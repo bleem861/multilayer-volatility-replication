@@ -1,0 +1,498 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Replication package README</title><style>body{margin:0;background:#f3f5f7;color:#24292f;font:16px/1.65 Arial,sans-serif}main{max-width:1500px;margin:28px auto;padding:32px 40px;background:white;border:1px solid #d8dee4;border-radius:8px}h1,h2,h3{line-height:1.3}h1,h2{border-bottom:1px solid #d8dee4;padding-bottom:10px}h2{margin-top:36px}a{color:#0969da}code{font-size:13px;background:#f0f2f4;padding:2px 4px;border-radius:3px;overflow-wrap:anywhere}pre{padding:16px;background:#f6f8fa;overflow:auto}pre code{padding:0;background:none}.table-wrap{overflow-x:auto;margin:18px 0}table{border-collapse:collapse;width:100%;font-size:14px}th,td{border:1px solid #d0d7de;padding:10px 12px;vertical-align:top;min-width:100px;overflow-wrap:anywhere}th{background:#eef3f8;text-align:left}tr:nth-child(even){background:#fafbfc}li{margin:4px 0}@media(max-width:700px){main{margin:0;padding:20px 16px;border:0}}@media print{body{background:white}main{margin:0;padding:0;border:0;max-width:none}.table-wrap{overflow:visible}table{font-size:9px}th,td{min-width:0;padding:4px}h2{break-after:avoid}}</style></head><body><main><h1>Replication package</h1>
+<p><strong>Forecasting global stock market volatilities: A multilayer network perspective</strong></p>
+<h2>1. Package information</h2>
+<ul>
+<li>Paper authors: Xia Zhao, Zhenyu Li, Jiefei Huang, and Yuping Song.</li>
+<li>Package author and contact email: Zhenyu Li, 15588393993@163.com.</li>
+<li>Package update date: 2026-09-27.</li>
+</ul>
+<h2>2. Contents</h2>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Location</th>
+<th>Contents</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>data/raw/</td>
+<td>Original input data</td>
+</tr>
+<tr>
+<td>data/processed/</td>
+<td>Analysis-ready data and saved intermediate results</td>
+</tr>
+<tr>
+<td>code/</td>
+<td>Data preparation, model, experiment, evaluation and output programs</td>
+</tr>
+<tr>
+<td>results/Reference/figures/</td>
+<td>Figures from the manuscript, supplied for comparison</td>
+</tr>
+<tr>
+<td>results/Reference/tables/</td>
+<td>Tables from the manuscript, supplied for comparison</td>
+</tr>
+<tr>
+<td>results/generated/</td>
+<td>New outputs created by running the code</td>
+</tr>
+</tbody>
+</table></div>
+<h2>3. Data</h2>
+<p>The paper uses daily realized volatility and open-to-close returns from the Oxford-Man Institute Realized Library for 18 markets, covering 3000 trading days from 2010-09-14 to 2022-02-25. The supplied RV.csv and Return.csv files contain the full historical data from 2000-01-03 to 2022-02-25, with 5807 observations per market.</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>File</th>
+<th>Contents</th>
+<th>Use</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>data/raw/RV.csv</code></td>
+<td>Daily realized volatility for 18 markets.</td>
+<td>Realized volatility analysis and forecasting.</td>
+</tr>
+<tr>
+<td><code>data/raw/Return.csv</code></td>
+<td>Daily open-to-close returns for 18 markets.</td>
+<td>Network construction and return-based analysis.</td>
+</tr>
+<tr>
+<td><code>data/raw/MAN_data.csv</code></td>
+<td>Market-level data, including dates, market identifiers and closing prices.</td>
+<td>Identification of bull- and bear-market periods for Tables C.3–C.8.</td>
+</tr>
+</tbody>
+</table></div>
+<p>The supplied intermediate files and their generation and use are listed below. The corresponding figure and table programs are listed in Section 6.</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Intermediate files</th>
+<th>Generating program and inputs</th>
+<th>Use and regenerated outputs</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>data/processed/centrality/P.csv</code></td>
+<td><code>code/prepare_centrality_indices.py</code>, using <code>data/raw/Return.csv</code> and <code>data/raw/RV.csv</code></td>
+<td>Used by the programs for Tables 2, 3, 4, 6, 7, C.1, C.3, C.5, C.6, C.8–C.10 and Fig. C.4, and by <code>code/Fig_04_prepare_VaR_data.py</code>, <code>code/prepare_market_forecast_gains.py</code> and <code>code/prepare_qlike_intermediate.py</code>. Recomputed indices are saved to <code>results/generated/centrality/P.csv</code>.</td>
+</tr>
+<tr>
+<td><code>data/processed/centrality/P_log.csv</code></td>
+<td><code>code/prepare_loghar_centrality_indices.py</code>, using <code>data/raw/Return.csv</code> and <code>data/raw/RV.csv</code></td>
+<td>Used by the programs for Tables 5, 8, C.2, C.4 and C.7, and by <code>code/prepare_qlike_intermediate.py</code>. Recomputed indices are saved to <code>results/generated/centrality/P_log.csv</code>.</td>
+</tr>
+<tr>
+<td><code>data/processed/centrality/single_metric/</code></td>
+<td><code>code/prepare_single_metric_centrality.py</code>, using <code>data/raw/Return.csv</code></td>
+<td>Used by Table C.9. Regenerated files are saved to <code>results/generated/centrality/single_metric/</code>; Table C.9 reads the supplied files by default.</td>
+</tr>
+<tr>
+<td><code>data/processed/market_gain/market_forecast_gains.xlsx</code></td>
+<td>Generated by <code>code/prepare_market_forecast_gains.py</code>, using <code>data/raw/RV.csv</code>, <code>data/raw/Return.csv</code>, <code>data/processed/centrality/P.csv</code> and <code>data/processed/evaluation/qlike_intermediate.csv</code>.</td>
+<td>Used by Fig. C.4. Regenerated data are saved to <code>results/generated/market_gain/market_forecast_gains.xlsx</code>; the figure reads the supplied file by default.</td>
+</tr>
+<tr>
+<td><code>data/processed/network_window_comparison/full_weighted_network_results.csv</code>; <code>data/processed/network_window_comparison/mst_network_results.csv</code></td>
+<td><code>code/prepare_full_network_window_results.py</code> and <code>code/prepare_mst_network_window_results.py</code>, respectively, using <code>data/raw/Return.csv</code> and <code>data/raw/RV.csv</code></td>
+<td>Recomputed CSV files are saved to <code>results/generated/network_window_comparison/</code>. The Fig. C.2 and C.3 programs read the supplied CSV files by default.</td>
+</tr>
+<tr>
+<td><code>data/processed/evaluation/qlike_intermediate.csv</code></td>
+<td>Contains market-specific dates excluded from QLIKE evaluation under predefined filtering rules. <code>code/prepare_qlike_intermediate.py</code>. Regenerated data are saved to <code>results/generated/evaluation/qlike_intermediate.csv</code>.</td>
+<td>Used by the programs for Tables C.1–C.10, the separate programs for Tables 4–6, and <code>code/prepare_market_forecast_gains.py</code>.</td>
+</tr>
+<tr>
+<td><code>data/processed/spillover/TCI_data_BK-TVP.csv</code></td>
+<td><code>code/prepare_spillover_indices.R</code>, using <code>data/raw/Return.csv</code></td>
+<td>Used by the programs for Tables 4, 7, C.1, C.3 and C.6, and by <code>code/prepare_qlike_intermediate.py</code>. Regenerated total and frequency-specific spillover indices are saved to <code>results/generated/spillover/TCI_data_BK-TVP.csv</code>.</td>
+</tr>
+<tr>
+<td>Six <code>.IXIC_daily.csv</code> and <code>.KS11_daily.csv</code> files under <code>data/processed/Fig_04_VaR/</code></td>
+<td><code>code/Fig_04_prepare_VaR_data.py</code>, using <code>data/raw/RV.csv</code>, <code>data/raw/Return.csv</code> and <code>data/processed/centrality/P.csv</code></td>
+<td>Used by <code>code/Fig_04_returns_and_HAR_CI_VaR_forecasts.py</code> for Fig. 4. Regenerated files are saved to <code>results/generated/Fig_04_VaR/</code>.</td>
+</tr>
+</tbody>
+</table></div>
+<h2>4. Software and hardware</h2>
+<ul>
+<li>Current computer: Windows 11 Home, 64-bit, build 26200.</li>
+<li>Language environments: Python 3.11 for all Python programs, and R 4.4.1 for the R program.</li>
+<li>Package versions are listed below.</li>
+<li>Hardware: Intel Core Ultra 7 155H (16 cores, 22 logical processors), 32 GB RAM, and integrated Intel Arc graphics. These are the current computer specifications, not minimum requirements.</li>
+</ul>
+<p>Python packages and reference versions are listed below. Python standard-library modules are not listed.</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Package</th>
+<th>Version</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>numpy</td>
+<td>1.26.4</td>
+</tr>
+<tr>
+<td>pandas</td>
+<td>2.2.2</td>
+</tr>
+<tr>
+<td>scipy</td>
+<td>1.13.1</td>
+</tr>
+<tr>
+<td>statsmodels</td>
+<td>0.14.2</td>
+</tr>
+<tr>
+<td>scikit-learn</td>
+<td>1.4.2</td>
+</tr>
+<tr>
+<td>arch</td>
+<td>7.2.0</td>
+</tr>
+<tr>
+<td>networkx</td>
+<td>3.2.1</td>
+</tr>
+<tr>
+<td>pycop</td>
+<td>0.0.13</td>
+</tr>
+<tr>
+<td>pymnet</td>
+<td>1.0.0</td>
+</tr>
+<tr>
+<td>matplotlib</td>
+<td>3.9.2</td>
+</tr>
+<tr>
+<td>seaborn</td>
+<td>0.13.2</td>
+</tr>
+<tr>
+<td>openpyxl</td>
+<td>3.1.2</td>
+</tr>
+<tr>
+<td>tqdm</td>
+<td>4.66.4</td>
+</tr>
+<tr>
+<td>tensorflow</td>
+<td>2.15.1</td>
+</tr>
+</tbody>
+</table></div>
+<p>The spillover preparation program uses R packages readr 2.1.5, zoo 1.8-12 and ConnectednessApproach 1.0.3.</p>
+<h2>5. Running instructions</h2>
+<p>Run the programs from the package root. Outputs are saved to <code>results/generated/</code>. Section 6 lists the program, inputs, generated output and reference file for each figure and table.</p>
+<p><strong>Using the supplied intermediate data:</strong> Run the corresponding program listed in Section 6. Programs that require intermediate data read the supplied files in <code>data/processed/</code> by default.</p>
+<p><strong>Regenerating intermediate data:</strong> Run the generating programs listed in Section 3, preparing their required inputs first. Newly generated files are saved to <code>results/generated/</code>; subsequent programs do not automatically use them. To use these files consistently, work with a copy of the package and replace the corresponding files in <code>data/processed/</code> with the regenerated files, preserving their filenames and subfolder structure. Then run the dependent programs listed in Sections 3 and 6. Keep the original package and reference files unchanged.</p>
+<h2>6. Outputs and verification</h2>
+<p>For Tables 4, 5 and 6, small differences from the reference results in MCS counts and CNN, LSTM and Transformer forecasts can arise from bootstrap resampling, random initialization and training, and differences in software versions or computing environments.</p>
+<p>For Tables 7 and 8, differences from the reference results may arise from two sources: random residual resampling in VaR estimation, which uses 5000 bootstrap draws, and stochastic elements of model training, particularly neural-network weight initialization and training-sample shuffling. These sources of variation can affect VaR forecasts and, consequently, violation rates, losses, test outcomes and model rankings.</p>
+<p>For Fig. 2, the spring layout has no fixed random seed, so node positions may vary between runs. This affects only the visual arrangement, not the network connections or numerical calculations.</p>
+<p>For Fig. 4, regenerating the VaR data uses 5000 bootstrap draws without a fixed random seed, so forecasts may differ from the supplied results.</p>
+<p>For Tables C.1 through C.8, bootstrap resampling can produce different MCS counts. Random initialization and training can also affect the CNN, LSTM and Transformer results in Tables C.5 and C.8; software versions and computing environments may contribute to differences between runs.</p>
+<p>Minor numerical variations arising from these sources are not expected to alter the main conclusions of the paper.</p>
+<p>Reference files are stored in <code>results/Reference/</code>. Newly generated outputs are saved to <code>results/generated/</code>. After running a script, compare its generated output with the corresponding reference file listed below.</p>
+<p>The table below lists the programs, input data, generated outputs and reference files for all 19 tables and 11 figures in the main paper and supplementary material.</p>
+<h3>Figure and table mapping</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Output</th>
+<th>Description</th>
+<th>Program / editable source</th>
+<th>Input files</th>
+<th>Generated files</th>
+<th>Reference files</th>
+<th>Notes</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Table 1</td>
+<td>Summary of forecasting models</td>
+<td>Not applicable</td>
+<td>Not applicable</td>
+<td>Not applicable</td>
+<td><code>results/Reference/tables/Table_01_model_summary.xls</code></td>
+<td>p10; Section 2.3. Descriptive summary of the models used in the paper; no data processing or code execution is required.</td>
+</tr>
+<tr>
+<td>Table 2</td>
+<td>Mean absolute correlations between composite centrality indices</td>
+<td><code>code/Table_02_centrality_correlations.py</code></td>
+<td><code>data/processed/centrality/P.csv</code></td>
+<td><code>results/generated/Table_02_centrality_correlations.csv</code></td>
+<td><code>results/Reference/tables/Table_02_centrality_correlations.csv</code></td>
+<td>p19; Section 4.2.3</td>
+</tr>
+<tr>
+<td>Table 3</td>
+<td>In-sample coefficients and model fit</td>
+<td><code>code/Table_03_in_sample_estimation.py</code></td>
+<td><code>data/raw/RV.csv</code>; <code>data/processed/centrality/P.csv</code></td>
+<td><code>results/generated/Table_03_in_sample_estimation.xlsx</code></td>
+<td><code>results/Reference/tables/Table_03_in_sample_estimation.xls</code></td>
+<td>p21; Section 4.3.</td>
+</tr>
+<tr>
+<td>Table 4</td>
+<td>Monthly forecast performance, Category 1 vs HAR</td>
+<td><code>code/Tables_04_05_06_forecast_performance.py</code></td>
+<td><code>data/raw/RV.csv</code>; <code>data/raw/Return.csv</code>; <code>data/processed/centrality/P.csv</code>; <code>data/processed/centrality/P_log.csv</code>; <code>data/processed/spillover/TCI_data_BK-TVP.csv</code></td>
+<td><code>results/generated/Table_04_category1_forecast_performance.xlsx</code></td>
+<td><code>results/Reference/tables/Table_04_category1_forecast_performance.xlsx</code></td>
+<td>p23; Section 4.4.1. Generating Tables 4, 5 and 6 together takes approximately 20 hours on our computer; runtime may vary across systems.</td>
+</tr>
+<tr>
+<td>Table 5</td>
+<td>Monthly forecast performance, Category 2 vs LogHAR</td>
+<td><code>code/Tables_04_05_06_forecast_performance.py</code></td>
+<td><code>data/raw/RV.csv</code>; <code>data/raw/Return.csv</code>; <code>data/processed/centrality/P.csv</code>; <code>data/processed/centrality/P_log.csv</code>; <code>data/processed/spillover/TCI_data_BK-TVP.csv</code></td>
+<td><code>results/generated/Table_05_category2_forecast_performance.xlsx</code></td>
+<td><code>results/Reference/tables/Table_05_category2_forecast_performance.xlsx</code></td>
+<td>p26; Section 4.4.1. Generating Tables 4, 5 and 6 together takes approximately 20 hours on our computer; runtime may vary across systems.</td>
+</tr>
+<tr>
+<td>Table 6</td>
+<td>Monthly forecast performance, Category 3 vs HAR</td>
+<td><code>code/Tables_04_05_06_forecast_performance.py</code></td>
+<td><code>data/raw/RV.csv</code>; <code>data/raw/Return.csv</code>; <code>data/processed/centrality/P.csv</code>; <code>data/processed/centrality/P_log.csv</code>; <code>data/processed/spillover/TCI_data_BK-TVP.csv</code></td>
+<td><code>results/generated/Table_06_category3_forecast_performance.xlsx</code></td>
+<td><code>results/Reference/tables/Table_06_category3_forecast_performance.xlsx</code></td>
+<td>p26; Section 4.4.1. Generating Tables 4, 5 and 6 together takes approximately 20 hours on our computer; runtime may vary across systems.</td>
+</tr>
+<tr>
+<td>Table 7</td>
+<td>VaR backtesting, HAR / HAR-CI / Categories 1 and 3</td>
+<td><code>code/Tables_07_08_VaR_backtesting.py</code></td>
+<td><code>data/raw/RV.csv</code>; <code>data/raw/Return.csv</code>; <code>data/processed/centrality/P.csv</code>; <code>data/processed/centrality/P_log.csv</code>; <code>data/processed/spillover/TCI_data_BK-TVP.csv</code></td>
+<td><code>results/generated/Table_07_VaR_backtesting.xlsx</code></td>
+<td><code>results/Reference/tables/Table_07_VaR_backtesting.xlsx</code></td>
+<td>p29; Section 4.4.2. Generating Tables 7 and 8 together takes approximately 20 hours on our computer; runtime may vary across systems.</td>
+</tr>
+<tr>
+<td>Table 8</td>
+<td>VaR backtesting, LogHAR / LogHAR-CI / Category 2</td>
+<td><code>code/Tables_07_08_VaR_backtesting.py</code></td>
+<td><code>data/raw/RV.csv</code>; <code>data/raw/Return.csv</code>; <code>data/processed/centrality/P.csv</code>; <code>data/processed/centrality/P_log.csv</code>; <code>data/processed/spillover/TCI_data_BK-TVP.csv</code></td>
+<td><code>results/generated/Table_08_VaR_backtesting.xlsx</code></td>
+<td><code>results/Reference/tables/Table_08_VaR_backtesting.xlsx</code></td>
+<td>p29; Section 4.4.2. Generating Tables 7 and 8 together takes approximately 20 hours on our computer; runtime may vary across systems.</td>
+</tr>
+<tr>
+<td>Fig. 1</td>
+<td>Empirical research flowchart</td>
+<td>Microsoft Visio (manually drawn; no code)</td>
+<td>Not applicable</td>
+<td>Not applicable</td>
+<td><code>results/Reference/figures/Fig_01_Flowchart_of_empirical_research.pdf</code></td>
+<td>p16; Section 4.1. Conceptual flowchart created in Microsoft Visio without data or code. The exported PDF is included; no computation is required.</td>
+</tr>
+<tr>
+<td>Fig. 2</td>
+<td>Four-layer networks constructed from the full sample</td>
+<td><code>code/Fig_02_multilayer_networks.py</code></td>
+<td><code>data/raw/Return.csv</code></td>
+<td><code>results/generated/Fig_02_multilayer_networks.pdf</code></td>
+<td><code>results/Reference/figures/Fig_02_multilayer_networks.pdf</code></td>
+<td>p17; Section 4.2.1.</td>
+</tr>
+<tr>
+<td>Fig. 3</td>
+<td>Four panels of dynamic interlayer association measures</td>
+<td><code>code/Fig_03_interlayer_association_measures.py</code></td>
+<td><code>data/raw/Return.csv</code></td>
+<td><code>results/generated/Fig_03_interlayer_association_measures.pdf</code></td>
+<td><code>results/Reference/figures/Fig_03_interlayer_association_measures.pdf</code></td>
+<td>p19; Section 4.2.2. Full computation and PDF generation take approximately 16 minutes on our computer; runtime may vary across systems.</td>
+</tr>
+<tr>
+<td>Fig. 4</td>
+<td>Returns and HAR-CI VaR forecasts for IXIC and KS11</td>
+<td><code>code/Fig_04_returns_and_HAR_CI_VaR_forecasts.py</code></td>
+<td><code>data/processed/Fig_04_VaR/VaR_0.011/HAR-CI-new/</code>, <code>VaR_0.051/HAR-CI-new/</code> and <code>VaR_0.11/HAR-CI-new/</code>, each containing <code>.IXIC_daily.csv</code> and <code>.KS11_daily.csv</code></td>
+<td><code>results/generated/Fig_04_returns_and_HAR_CI_VaR_forecasts.pdf</code></td>
+<td><code>results/Reference/figures/Fig_04_returns_and_HAR_CI_VaR_forecasts.pdf</code></td>
+<td>p28; Section 4.4.2. See Section 5 for data regeneration.</td>
+</tr>
+<tr>
+<td>Fig. A.1</td>
+<td>Rolling window procedure</td>
+<td>Microsoft PowerPoint (manually drawn; no code)</td>
+<td>Not applicable</td>
+<td>Not applicable</td>
+<td><code>results/Reference/figures/Fig_A_01_rolling_window_procedure.pdf</code></td>
+<td>Main text Section 2.5. Conceptual illustration created in Microsoft PowerPoint without data or code. The exported PDF is included; no computation is required.</td>
+</tr>
+<tr>
+<td>Fig. A.2</td>
+<td>Expanding window procedure</td>
+<td>Microsoft PowerPoint (manually drawn; no code)</td>
+<td>Not applicable</td>
+<td>Not applicable</td>
+<td><code>results/Reference/figures/Fig_A_02_expanding_window_procedure.pdf</code></td>
+<td>Main text Section 5.1. Conceptual illustration created in Microsoft PowerPoint without data or code. The exported PDF is included; no computation is required.</td>
+</tr>
+<tr>
+<td>Fig. B.1</td>
+<td>Realized volatility and daily returns for the 18 markets</td>
+<td><code>code/Fig_B_01_realized_volatility_and_daily_returns.py</code></td>
+<td><code>data/raw/Return.csv</code>; <code>data/raw/RV.csv</code></td>
+<td><code>results/generated/Fig_B_01_realized_volatility_and_daily_returns.pdf</code></td>
+<td><code>results/Reference/figures/Fig_B_01_realized_volatility_and_daily_returns.pdf</code></td>
+<td>Main text Section 3; supplementary Appendix B. The figure covers 14 September 2010 to 25 February 2022.</td>
+</tr>
+<tr>
+<td>Fig. C.1</td>
+<td>Average MSE improvement under alternative network window lengths</td>
+<td><code>code/Fig_C_01_validation_window_search.py</code></td>
+<td><code>data/raw/Return.csv</code>; <code>data/raw/RV.csv</code></td>
+<td><code>results/generated/Fig_C_01_validation_window_search.pdf</code></td>
+<td><code>results/Reference/figures/Fig_C_01_validation_window_search.pdf</code></td>
+<td>Main text Section 6.1; supplementary Fig. C.1. Full computation and PDF generation take approximately 4 hours on our computer; runtime may vary across systems.</td>
+</tr>
+<tr>
+<td>Fig. C.2</td>
+<td>MST versus full weighted network, MSE</td>
+<td><code>code/Fig_C_02_MST_vs_full_network_MSE.py</code></td>
+<td><code>data/processed/network_window_comparison/full_weighted_network_results.csv</code>; <code>data/processed/network_window_comparison/mst_network_results.csv</code></td>
+<td><code>results/generated/Fig_C_02_MST_vs_full_network_MSE.pdf</code></td>
+<td><code>results/Reference/figures/Fig_C_02_MST_vs_full_network_MSE.pdf</code></td>
+<td>Main text Section 6.4; supplementary Fig. C.2.</td>
+</tr>
+<tr>
+<td>Fig. C.3</td>
+<td>MST versus full weighted network, QLIKE</td>
+<td><code>code/Fig_C_03_MST_vs_full_network_QLIKE.py</code></td>
+<td><code>data/processed/network_window_comparison/full_weighted_network_results.csv</code>; <code>data/processed/network_window_comparison/mst_network_results.csv</code></td>
+<td><code>results/generated/Fig_C_03_MST_vs_full_network_QLIKE.pdf</code></td>
+<td><code>results/Reference/figures/Fig_C_03_MST_vs_full_network_QLIKE.pdf</code></td>
+<td>Main text Section 6.4; supplementary Fig. C.3.</td>
+</tr>
+<tr>
+<td>Fig. C.4</td>
+<td>Market centrality and forecast gains</td>
+<td><code>code/Fig_C_04_market_centrality_and_forecast_gains.py</code></td>
+<td><code>data/processed/centrality/P.csv</code>; <code>data/processed/market_gain/market_forecast_gains.xlsx</code></td>
+<td><code>results/generated/Fig_C_04_market_centrality_and_forecast_gains.pdf</code></td>
+<td><code>results/Reference/figures/Fig_C_04_market_centrality_and_forecast_gains.pdf</code></td>
+<td>Main text Section 6.5; supplementary Fig. C.4.</td>
+</tr>
+<tr>
+<td>Table B.1</td>
+<td>Descriptive statistics of realized volatility and daily returns</td>
+<td><code>code/Table_B_01_descriptive_statistics.py</code></td>
+<td><code>data/raw/RV.csv</code>; <code>data/raw/Return.csv</code></td>
+<td><code>results/generated/Table_B_01_descriptive_statistics.xlsx</code></td>
+<td><code>results/Reference/tables/Table_B_01_descriptive_statistics.xlsx</code></td>
+<td>Main text Section 3; supplementary Appendix B.</td>
+</tr>
+<tr>
+<td>Table C.1</td>
+<td>Expanding-window forecast performance, Category 1</td>
+<td><code>code/Tables_C_01_C_02_expanding_window_performance.py</code></td>
+<td><code>data/raw/RV.csv</code>; <code>data/raw/Return.csv</code>; <code>data/processed/centrality/P.csv</code>; <code>data/processed/centrality/P_log.csv</code>; <code>data/processed/spillover/TCI_data_BK-TVP.csv</code>; <code>data/processed/evaluation/qlike_intermediate.csv</code></td>
+<td><code>results/generated/Table_C_01_expanding_window_category1.xlsx</code></td>
+<td><code>results/Reference/tables/Table_C_01_expanding_window_category1.xls</code></td>
+<td>Main text Section 5.1; supplementary Table C.1. Generating Tables C.1 and C.2 together takes approximately 4 hours on our computer; runtime may vary across systems.</td>
+</tr>
+<tr>
+<td>Table C.2</td>
+<td>Expanding-window forecast performance, Category 2</td>
+<td><code>code/Tables_C_01_C_02_expanding_window_performance.py</code></td>
+<td><code>data/raw/RV.csv</code>; <code>data/raw/Return.csv</code>; <code>data/processed/centrality/P.csv</code>; <code>data/processed/centrality/P_log.csv</code>; <code>data/processed/spillover/TCI_data_BK-TVP.csv</code>; <code>data/processed/evaluation/qlike_intermediate.csv</code></td>
+<td><code>results/generated/Table_C_02_expanding_window_category2.xlsx</code></td>
+<td><code>results/Reference/tables/Table_C_02_expanding_window_category2.xls</code></td>
+<td>Main text Section 5.1; supplementary Table C.2. Generating Tables C.1 and C.2 together takes approximately 4 hours on our computer; runtime may vary across systems.</td>
+</tr>
+<tr>
+<td>Table C.3</td>
+<td>Bull-market forecast performance, Category 1</td>
+<td><code>code/Tables_C_03_C_04_C_05_bull_market_performance.py</code></td>
+<td><code>data/raw/MAN_data.csv</code>; <code>data/raw/RV.csv</code>; <code>data/raw/Return.csv</code>; <code>data/processed/centrality/P.csv</code>; <code>data/processed/centrality/P_log.csv</code>; <code>data/processed/spillover/TCI_data_BK-TVP.csv</code>; <code>data/processed/evaluation/qlike_intermediate.csv</code></td>
+<td><code>results/generated/Table_C_03_bull_market_category1.xlsx</code></td>
+<td><code>results/Reference/tables/Table_C_03_bull_market_category1.xls</code></td>
+<td>Main text Section 5.2; supplementary Table C.3. Generating Tables C.3, C.4 and C.5 together takes approximately 3 hours on our computer; runtime may vary across systems.</td>
+</tr>
+<tr>
+<td>Table C.4</td>
+<td>Bull-market forecast performance, Category 2</td>
+<td><code>code/Tables_C_03_C_04_C_05_bull_market_performance.py</code></td>
+<td><code>data/raw/MAN_data.csv</code>; <code>data/raw/RV.csv</code>; <code>data/raw/Return.csv</code>; <code>data/processed/centrality/P.csv</code>; <code>data/processed/centrality/P_log.csv</code>; <code>data/processed/spillover/TCI_data_BK-TVP.csv</code>; <code>data/processed/evaluation/qlike_intermediate.csv</code></td>
+<td><code>results/generated/Table_C_04_bull_market_category2.xlsx</code></td>
+<td><code>results/Reference/tables/Table_C_04_bull_market_category2.xls</code></td>
+<td>Main text Section 5.2; supplementary Table C.4. Generating Tables C.3, C.4 and C.5 together takes approximately 3 hours on our computer; runtime may vary across systems.</td>
+</tr>
+<tr>
+<td>Table C.5</td>
+<td>Bull-market forecast performance, Category 3</td>
+<td><code>code/Tables_C_03_C_04_C_05_bull_market_performance.py</code></td>
+<td><code>data/raw/MAN_data.csv</code>; <code>data/raw/RV.csv</code>; <code>data/raw/Return.csv</code>; <code>data/processed/centrality/P.csv</code>; <code>data/processed/centrality/P_log.csv</code>; <code>data/processed/spillover/TCI_data_BK-TVP.csv</code>; <code>data/processed/evaluation/qlike_intermediate.csv</code></td>
+<td><code>results/generated/Table_C_05_bull_market_category3.xlsx</code></td>
+<td><code>results/Reference/tables/Table_C_05_bull_market_category3.xls</code></td>
+<td>Main text Section 5.2; supplementary Table C.5. Generating Tables C.3, C.4 and C.5 together takes approximately 3 hours on our computer; runtime may vary across systems.</td>
+</tr>
+<tr>
+<td>Table C.6</td>
+<td>Bear-market forecast performance, Category 1</td>
+<td><code>code/Tables_C_06_C_07_C_08_bear_market_performance.py</code></td>
+<td><code>data/raw/MAN_data.csv</code>; <code>data/raw/RV.csv</code>; <code>data/raw/Return.csv</code>; <code>data/processed/centrality/P.csv</code>; <code>data/processed/centrality/P_log.csv</code>; <code>data/processed/spillover/TCI_data_BK-TVP.csv</code>; <code>data/processed/evaluation/qlike_intermediate.csv</code></td>
+<td><code>results/generated/Table_C_06_bear_market_category1.xlsx</code></td>
+<td><code>results/Reference/tables/Table_C_06_bear_market_category1.xls</code></td>
+<td>Main text Section 5.2; supplementary Table C.6. Generating Tables C.6, C.7 and C.8 together takes approximately 3 hours on our computer; runtime may vary across systems.</td>
+</tr>
+<tr>
+<td>Table C.7</td>
+<td>Bear-market forecast performance, Category 2</td>
+<td><code>code/Tables_C_06_C_07_C_08_bear_market_performance.py</code></td>
+<td><code>data/raw/MAN_data.csv</code>; <code>data/raw/RV.csv</code>; <code>data/raw/Return.csv</code>; <code>data/processed/centrality/P.csv</code>; <code>data/processed/centrality/P_log.csv</code>; <code>data/processed/spillover/TCI_data_BK-TVP.csv</code>; <code>data/processed/evaluation/qlike_intermediate.csv</code></td>
+<td><code>results/generated/Table_C_07_bear_market_category2.xlsx</code></td>
+<td><code>results/Reference/tables/Table_C_07_bear_market_category2.xls</code></td>
+<td>Main text Section 5.2; supplementary Table C.7. Generating Tables C.6, C.7 and C.8 together takes approximately 3 hours on our computer; runtime may vary across systems.</td>
+</tr>
+<tr>
+<td>Table C.8</td>
+<td>Bear-market forecast performance, Category 3</td>
+<td><code>code/Tables_C_06_C_07_C_08_bear_market_performance.py</code></td>
+<td><code>data/raw/MAN_data.csv</code>; <code>data/raw/RV.csv</code>; <code>data/raw/Return.csv</code>; <code>data/processed/centrality/P.csv</code>; <code>data/processed/centrality/P_log.csv</code>; <code>data/processed/spillover/TCI_data_BK-TVP.csv</code>; <code>data/processed/evaluation/qlike_intermediate.csv</code></td>
+<td><code>results/generated/Table_C_08_bear_market_category3.xlsx</code></td>
+<td><code>results/Reference/tables/Table_C_08_bear_market_category3.xls</code></td>
+<td>Main text Section 5.2; supplementary Table C.8. Generating Tables C.6, C.7 and C.8 together takes approximately 3 hours on our computer; runtime may vary across systems.</td>
+</tr>
+<tr>
+<td>Table C.9</td>
+<td>Single-centrality comparisons</td>
+<td><code>code/Table_C_09_single_centrality_comparison.py</code></td>
+<td><code>data/raw/RV.csv</code>; <code>data/raw/Return.csv</code>; <code>data/processed/centrality/P.csv</code>; <code>data/processed/centrality/single_metric/</code>; <code>data/processed/evaluation/qlike_intermediate.csv</code></td>
+<td><code>results/generated/Table_C_09_single_centrality_comparison.xlsx</code></td>
+<td><code>results/Reference/tables/Table_C_09_single_centrality_comparison.xlsx</code></td>
+<td>Main text Section 6.2; supplementary Table C.9. Generating this table takes approximately 5 minutes on our computer; runtime may vary across systems.</td>
+</tr>
+<tr>
+<td>Table C.10</td>
+<td>Single-layer and dropped-layer comparisons</td>
+<td><code>code/Table_C_10_network_layer_comparison.py</code></td>
+<td><code>data/raw/RV.csv</code>; <code>data/raw/Return.csv</code>; <code>data/processed/centrality/P.csv</code>; <code>data/processed/evaluation/qlike_intermediate.csv</code></td>
+<td><code>results/generated/Table_C_10_network_layer_comparison.xlsx</code></td>
+<td><code>results/Reference/tables/Table_C_10_network_layer_comparison.xlsx</code></td>
+<td>Main text Section 6.3; supplementary Table C.10. Generating this table takes approximately 10 minutes on our computer; runtime may vary across systems.</td>
+</tr>
+</tbody>
+</table></div></main></body></html>
