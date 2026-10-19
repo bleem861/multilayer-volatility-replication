@@ -6,7 +6,7 @@
 
 - Paper authors: Xia Zhao, Zhenyu Li, Jiefei Huang, and Yuping Song.
 - Package author and contact email: Zhenyu Li, 15588393993@163.com.
-- Package update date: 2026-09-27.
+- Package update date: 2026-10-16.
 
 ## 2. Contents
 
@@ -69,6 +69,20 @@ Python packages and reference versions are listed below. Python standard-library
 | tensorflow | 2.15.1 |
 
 The spillover preparation program uses R packages readr 2.1.5, zoo 1.8-12 and ConnectednessApproach 1.0.3.
+
+To regenerate `P.csv` and `P_log.csv`, use the dedicated Windows 64-bit environment with Python 3.11.9, the Anaconda MKL build of NumPy 1.26.4 and MKL 2023.1. Numerical backends and floating-point summation can change the ordering of nearly equal centrality measures and, consequently, the rank-based indices. The two preparation programs check the required environment before calculation.
+
+The configuration below fixes the MKL instruction path and calculation thread count for Windows 64-bit systems with AVX2-capable Intel processors. From Anaconda Prompt, run the following commands at the package root to create the environment and generate both centrality datasets:
+
+```text
+conda create -n centrality-reproduction --file centrality-win64-explicit.txt
+conda env config vars set -n centrality-reproduction MKL_ENABLE_INSTRUCTIONS=AVX2 MKL_CBWR=AVX2 MKL_NUM_THREADS=1 OMP_NUM_THREADS=1 MKL_DYNAMIC=FALSE OMP_DYNAMIC=FALSE
+conda run -n centrality-reproduction python -m pip install --no-deps pycop==0.0.13
+conda run --no-capture-output -n centrality-reproduction python code/prepare_centrality_indices.py
+conda run --no-capture-output -n centrality-reproduction python code/prepare_loghar_centrality_indices.py
+```
+
+This environment is intended for the two centrality preparation programs and Table 3; it does not include all dependencies needed by the other programs. These commands use the dedicated environment directly and do not require changing Spyder settings.
 
 ## 5. Running instructions
 

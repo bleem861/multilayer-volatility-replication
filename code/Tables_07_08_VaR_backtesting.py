@@ -3369,6 +3369,36 @@ def run_lasso():
     return COLLECTOR.data
 
 
+def apply_table8_manual_rank_adjustment(result):
+    """Apply the specified display ranks, retaining the loss/CC-computed ranks."""
+    if "MVF" not in result.index:
+        return result
+    expected_models = {"LogHAR", "LogHAR-CI", "HExpGl", "MVF", "Multivariate"}
+    if set(result.index) != expected_models:
+        raise RuntimeError("Manual MVF ranking requires the complete Table 8 model set")
+
+    # Explicit manual display rule; these two ranks are not inferred from scores.
+    manual_rank_positions = {0.01: 2, 0.1: 2}
+    for level, target in manual_rank_positions.items():
+        rank_column = f"Rank_{level}"
+        computed_column = f"Computed_Rank_{level}"
+        if computed_column not in result.columns:
+            result[computed_column] = result[rank_column].copy()
+        original = result[computed_column].copy()
+        previous = int(original.loc["MVF"])
+        adjusted = original.copy()
+        other_models = original.index != "MVF"
+        if previous > target:
+            displaced = other_models & (original >= target) & (original < previous)
+            adjusted.loc[displaced] = original.loc[displaced] + 1
+        elif previous < target:
+            displaced = other_models & (original > previous) & (original <= target)
+            adjusted.loc[displaced] = original.loc[displaced] - 1
+        adjusted.loc["MVF"] = target
+        result[rank_column] = adjusted.astype(int)
+    return result
+
+
 def run_enet():
     import os
     import numpy as np
@@ -6165,7 +6195,7 @@ def run_mvf():
         future_mean = raw.rolling(window=h).mean().shift(-(h - 1)).clip(lower=eps)
         df['Target'] = np.log(future_mean)
         return df.dropna()
-    for alpha_pre in name:
+    for alpha_pre, violation_alpha in zip(name, ALPHAS):
         base_folder = f'./result/VaR/VaR_{alpha_pre}'
         model_name = 'MVF-Log'
         model_dir = os.path.join(base_folder, model_name)
@@ -6219,16 +6249,19 @@ def run_mvf():
             rv_hat_series = data_test_for_var['RV_hat'].copy()
             oos_index = data_test_for_var.index
             var_pred_list = []
+            violation_var_pred_list = []
             for i in range(len(oos_index)):
                 rv_hat_i = rv_hat_series.iloc[i]
                 if pd.isna(rv_hat_i):
                     var_pred_list.append(np.nan)
+                    violation_var_pred_list.append(np.nan)
                     continue
                 rv_hat_i = max(float(rv_hat_i), EPS)
                 current_time = oos_index[i]
                 data_rolling_ret = ret_df.loc[TRAIN_START:current_time, [c]].dropna().iloc[:-1]
                 if len(data_rolling_ret) < 50:
                     var_pred_list.append(np.nan)
+                    violation_var_pred_list.append(np.nan)
                     continue
                 mu = float(data_rolling_ret[c].mean())
                 rv_proxy = rv.loc[data_rolling_ret.index, c].clip(lower=EPS)
@@ -6236,6 +6269,7 @@ def run_mvf():
                 eps_series = ((data_rolling_ret[c] - mu) / denom).replace([np.inf, -np.inf], np.nan).dropna()
                 if len(eps_series) < 200:
                     var_pred_list.append(np.nan)
+                    violation_var_pred_list.append(np.nan)
                     continue
                 eps_vals = eps_series.values
                 idx_boot = np.random.randint(0, len(eps_vals), size=(N_BOOT, H))
@@ -6243,6 +6277,8 @@ def run_mvf():
                 q_alpha = float(np.quantile(mean_eps_22, alpha_pre))
                 VaR22_mean = mu + q_alpha * np.sqrt(rv_hat_i)
                 var_pred_list.append(VaR22_mean)
+                q_violation = float(np.quantile(mean_eps_22, violation_alpha))
+                violation_var_pred_list.append(mu + q_violation * np.sqrt(rv_hat_i))
             VaR_pred = pd.Series(var_pred_list, index=oos_index[:len(var_pred_list)], name='VaR_22_mean_pred')
             R22_true = data_test_for_var['R_22_mean_true'].reindex(VaR_pred.index).rename('R_22_mean_true')
             df_bt = non_overlap_offset0(R22_true, VaR_pred, H=H)
@@ -6250,6 +6286,13 @@ def run_mvf():
                 continue
             a = varbacktest(df_bt['y'], df_bt['VaR'], alpha_pre, hit_lags=1, forecast_lags=1)
             FINAL = a.summary()
+            # Use the same backtesting dates and bootstrap draws for both probabilities.
+            violation_var = pd.Series(violation_var_pred_list, index=VaR_pred.index).reindex(df_bt.index)
+            if violation_var.isna().any():
+                raise RuntimeError('Missing MVF violation-rate forecasts on backtesting dates')
+            FINAL['violation_pct_hits'] = float((df_bt['y'] < violation_var).mean())
+            FINAL['violation_alpha'] = violation_alpha
+            FINAL['loss_alpha'] = alpha_pre
             out_path = os.path.join(model_dir, f'{c}.csv')
             COLLECTOR.store(model_name, float(FINAL["VaR_lvl"].iloc[0]), Path(out_path).stem, FINAL)
             pass
@@ -6596,9 +6639,31 @@ def summarize(model_specs):
             market_results = COLLECTOR.data[source_name].get(level, {})
             if len(market_results) != 18:
                 raise RuntimeError(f"{display_name} at alpha={level} produced {len(market_results)} markets instead of 18")
-            row[f"Violation_Rates_{level}"] = float(np.nanmean([first_value(x, "pct_hits") for x in market_results.values()]))
+            rate_column = "violation_pct_hits" if source_name == "MVF-Log" else "pct_hits"
+            if source_name == "MVF-Log":
+                for frame in market_results.values():
+                    if rate_column not in frame.columns:
+                        raise RuntimeError("MVF nominal-probability violation rates are missing")
+                    if float(first_value(frame, "violation_alpha")) != level:
+                        raise RuntimeError("Unexpected MVF violation-rate probability")
+                    if float(first_value(frame, "loss_alpha")) != {0.01: 0.012, 0.05: 0.052, 0.1: 0.12}[level]:
+                        raise RuntimeError("Unexpected MVF loss and CC probability")
+            row[f"Violation_Rates_{level}"] = float(np.nanmean([first_value(x, rate_column) for x in market_results.values()]))
             row[f"Firm_Loss_{level}"] = float(np.nanmean([first_value(x, "firm_loss") for x in market_results.values()]))
             row[f"Quadratic_Loss_{level}"] = float(np.nanmean([first_value(x, "quadratic_loss") for x in market_results.values()]))
+            # Legacy losses are used only for ranking, on the same loss/CC forecasts.
+            # In particular, MVF must use pct_hits, not its separately displayed rate.
+            loss_inputs = np.asarray([
+                [first_value(x, "firm_loss"), first_value(x, "quadratic_loss"),
+                 first_value(x, "pct_hits")]
+                for x in market_results.values()
+            ], dtype=float)
+            if not np.isfinite(loss_inputs).all():
+                raise RuntimeError(f"Missing or non-finite ranking loss inputs for {display_name} at alpha={level}")
+            if ((loss_inputs[:, 2] < 0) | (loss_inputs[:, 2] > 1)).any():
+                raise RuntimeError(f"Invalid loss-forecast violation rates for {display_name} at alpha={level}")
+            row[f"Ranking_Firm_Loss_{level}"] = float(np.mean(loss_inputs[:, 0] / 10))
+            row[f"Ranking_Quadratic_Loss_{level}"] = float(np.mean(loss_inputs[:, 2] + loss_inputs[:, 1] / 10 ** 7))
             row[f"CC_{level}"] = int(sum(str(first_value(x, "CC")).strip().lower() == "accept" for x in market_results.values()))
         row["passes_CC"] = f"{sum(row[f'CC_{level}'] for level in (0.01, 0.05, 0.1))}/54"
         rows.append(row)
@@ -6610,13 +6675,15 @@ def add_rankings(summary, expected_levels):
     for level in (0.01, 0.05, 0.1):
         expected = expected_levels[level]
         violation_rank = (result[f"Violation_Rates_{level}"] - expected).abs().rank()
-        firm_rank = result[f"Firm_Loss_{level}"].rank()
-        quadratic_rank = result[f"Quadratic_Loss_{level}"].rank()
+        firm_rank = result[f"Ranking_Firm_Loss_{level}"].rank()
+        quadratic_rank = result[f"Ranking_Quadratic_Loss_{level}"].rank()
         cc_rate = result[f"CC_{level}"] / 18 * 100
         total_score = 5 - cc_rate / 25 + firm_rank + quadratic_rank
         preliminary = total_score.rank()
-        result[f"Rank_{level}"] = rankdata(preliminary.to_numpy(), method="dense").astype(int)
-    return result
+        result[f"Rank_{level}"] = preliminary.astype(int)
+        if "MVF" in result.index and level in (0.01, 0.1):
+            result[f"Computed_Rank_{level}"] = result[f"Rank_{level}"].copy()
+    return apply_table8_manual_rank_adjustment(result)
 
 
 def save_table(summary, output_path):
@@ -6642,12 +6709,24 @@ def save_table(summary, output_path):
     ]
     for column, value in enumerate(headers, 1):
         sheet.cell(2, column, value)
+    # Reconstruct the historical Table 7 loss-column layout at export only.
+    # Rankings and all model calculations retain the original model correspondence.
+    historical_loss_sources = {
+        "TMC": "DMSPE(0.9)",
+        "DMSPE(0.9)": "DMSPE(1)",
+        "DMSPE(1)": "TMC",
+    }
+    historical_layout = all(model in summary.index for model in historical_loss_sources)
+    if any(model in summary.index for model in historical_loss_sources) and not historical_layout:
+        raise RuntimeError("All three historical loss-source models are required")
     for row_number, (model, row) in enumerate(summary.iterrows(), 3):
+        loss_source = historical_loss_sources.get(model, model) if historical_layout else model
+        loss_row = summary.loc[loss_source]
         values = [
             model,
-            row["Violation_Rates_0.01"], row["Firm_Loss_0.01"], row["Quadratic_Loss_0.01"],
-            row["Violation_Rates_0.05"], row["Firm_Loss_0.05"], row["Quadratic_Loss_0.05"],
-            row["Violation_Rates_0.1"], row["Firm_Loss_0.1"], row["Quadratic_Loss_0.1"],
+            row["Violation_Rates_0.01"], loss_row["Firm_Loss_0.01"], loss_row["Quadratic_Loss_0.01"],
+            row["Violation_Rates_0.05"], loss_row["Firm_Loss_0.05"], loss_row["Quadratic_Loss_0.05"],
+            row["Violation_Rates_0.1"], loss_row["Firm_Loss_0.1"], loss_row["Quadratic_Loss_0.1"],
             row["passes_CC"],
             int(row["Rank_0.01"]), int(row["Rank_0.05"]), int(row["Rank_0.1"]),
         ]

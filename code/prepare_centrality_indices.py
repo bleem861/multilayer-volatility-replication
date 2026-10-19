@@ -17,6 +17,20 @@ FIT_END_DATE = pd.Timestamp('2018-05-01')
 PRED_END = pd.Timestamp('2022-02-25')
 
 
+def _check_reproduction_environment():
+    import sys
+    if sys.version_info[:2] != (3, 11):
+        raise RuntimeError("Centrality reproduction requires Python 3.11.")
+    if np.__version__ != "1.26.4":
+        raise RuntimeError("Centrality reproduction requires NumPy 1.26.4 with the Anaconda MKL build.")
+    configuration = getattr(np.__config__, "CONFIG", {})
+    blas = configuration.get("Build Dependencies", {}).get("blas", {})
+    if "mkl" not in str(blas.get("name", "")).lower():
+        raise RuntimeError("Centrality reproduction requires the MKL build of NumPy; the current numerical backend differs.")
+    if str(blas.get("version", "")).split(".")[:2] != ["2023", "1"]:
+        raise RuntimeError("Use the NumPy MKL 2023.1 build specified in the reproduction environment.")
+
+
 def build_network_weighted(corr_matrix: pd.DataFrame):
     G = nx.Graph()
     for n1, row in corr_matrix.iterrows():
@@ -292,6 +306,7 @@ def compute_P_series(df_ret: pd.DataFrame, L_net: int, start_date, end_date):
 
 
 if __name__ == '__main__':
+    _check_reproduction_environment()
     df_ret = read_returns(RET_PATH)
     data_rv = read_rv(RV_PATH)
     if FIT_END_DATE not in data_rv.index:
