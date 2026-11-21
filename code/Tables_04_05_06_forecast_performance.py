@@ -5926,7 +5926,7 @@ def compute_shared_drop_dates(table4, predictions4, predictions5, predictions6, 
     return shared
 
 
-QLIKE_CALENDAR_SHA256 = '0482fa959c69b17b9fff815aab015f09f96347b8341f4b3714c33f03d4a7c56c'
+QLIKE_CALENDAR_SHA256 = '664db2574269421ccc02d303be2c21c280929d9742b259e6997db4e8a9e28017'
 QLIKE_SAMPLING_FILES = {'AEX': {'sha256': 'e964c9e9f1d0943e0a1964b15cbf19b8d8302842c03d1b2bcb5bbd82cef758a4', 'rows': 830, 'dates_sha256': '5e23020e66187cb1f0a95042d31ff1b8a1cbb8009364e1789e6efa9888a7e25c'}, 'AORD': {'sha256': 'eb28e31e9e7d11b8ea4a5288c6dd5f10a1817a8d0ea98d35f59b0a90b4ca708d', 'rows': 775, 'dates_sha256': '9b0496e147150e46d23ab8546f5102eebb8287de67c1d68ac23bed06fbb51956'}, 'BFX': {'sha256': 'ac25191dce58dfe58a53680a3f7c766e12539aead5c7dd3b222ae75f69938e0e', 'rows': 914, 'dates_sha256': '3d0a7437a016087024a06f2da261fc102e93abf244f225fe991e7f5258fc1d96'}, 'BSESN': {'sha256': 'f7f36cddba9dd0b8c101bb94290ac44eb8a38d966e818ab738e64d2c9953b330', 'rows': 799, 'dates_sha256': '3c4d46a66702b18a87eb67f94b28c7493c0babd938162e1b4e756817506618df'}, 'BVSP': {'sha256': 'cfe9a0615d85b4b9b8616cbad3775421a5aed7007de0e5679ec30a7517cacefa', 'rows': 898, 'dates_sha256': 'aad6813dbd3d394a1d500d7905f07d42003bccb64ea62036270d09cde8615e29'}, 'FCHI': {'sha256': '896e805031a2b3158ef3276399b6aee0c3b5682d7bb385b3cbec68f233acafb6', 'rows': 875, 'dates_sha256': '11055f73a88f87dca6359955be2d65ba38bb025a4fcd24cc03bc18695aae56f8'}, 'FTSE': {'sha256': 'f0d9be3c081d562a53baf8c9a1b430c3f6c7266a9629538b872b620ed286baa8', 'rows': 903, 'dates_sha256': 'e2f89324d30305604a37c2dc1a62aaa6bcede4f6284dbe8afe7191e20337cefe'}, 'GDAXI': {'sha256': 'ae3b010cf8c496521a6324b386fc0a5c009445e50e95f9651c5072afb473d509', 'rows': 892, 'dates_sha256': '38a20585d4a1b2e16260393cd0826f46993ede5498a57d5c6067d439c3a187f7'}, 'GSPTSE': {'sha256': '1c11eeb0c11dbb2ce529e0a7d38b4017f3c582a3a6b70af401602fdcc3b2b849', 'rows': 713, 'dates_sha256': 'b029269fb32831655af79e9ec9ee59747333095a9d5f83a08b1b8f4528e9b104'}, 'IXIC': {'sha256': '44750ebf7208762914ab636341c6d886a1fb7585a7664b7051bfbd001eb582f5', 'rows': 766, 'dates_sha256': 'e4cb226cd7e172c6dbc398be2fb880132e0be4393f5cd2e06f8a1dbea72fc679'}, 'KS11': {'sha256': 'd770c95f7495e5e19f5bce75a5d5d1a7188622317094fcc909a8505445d698df', 'rows': 968, 'dates_sha256': '45b31cc2ea19487171ede44deff35355ea0b9bd792ad9eaabc5eff34de6e1553'}, 'KSE': {'sha256': '7c2e673d9452ed746c8ca458034ff2c26646ca12ae769da94b7e4fbd7cb6259e', 'rows': 935, 'dates_sha256': 'accbfcfca071a7441d8ef1505cfeeee65b4b950a28e80756b1695288a7dfd512'}, 'OMXC20': {'sha256': '9db91bf804ab607a7bef447b825949a0421e9fa13da0edf88a2c819f3d8af4b6', 'rows': 974, 'dates_sha256': 'ed4060c24eefbe4bbe08a75bf4f3c18d1b18614519651b3bc585d00c99e340ab'}, 'OMXHPI': {'sha256': '3dddf81a0fa720bf0ab073758be30ab74e888ec4b0674596ec08a6aeffb3af6d', 'rows': 955, 'dates_sha256': '7b1d638d5328594af8c6e2107acdf08d6cb5428ad2eda61589f24b57f063db4b'}, 'OMXSPI': {'sha256': '477c79c49f830f44882445144a0bd9d285cbb3ad8cf1aaa24a360fa867803ddb', 'rows': 952, 'dates_sha256': 'da33d8a3a978dc17469339cc12d39a93cd623c08e9ed6dd589a22e51878ce391'}, 'OSEAX': {'sha256': '466879eba921a1cb6feaa38887d03ebc561198a65c16216103fb5e422ae3bb56', 'rows': 796, 'dates_sha256': '89a6564c2eb1ccf3a7bef69ef42a66737a7fe2c8f7037868528ff8c2d11a22b2'}, 'RUT': {'sha256': '6a1834128e482658fc520b59bcf3b6c2b2e381075a05615a2a113519c8a51f37', 'rows': 845, 'dates_sha256': '34130e6d316597807a9e650f046e9c9379035d7f85f2ea8bb4d67073d8f425f4'}, 'SSMI': {'sha256': 'e7995956f5548548934f79e70ed1591e924f6e8d726a5898dae3b5395978ca12', 'rows': 728, 'dates_sha256': '853f409ea673553a5093cacd6263d7595adfc1e3a71e463b3e85b7a6720c0494'}}
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -5947,9 +5947,11 @@ def sample_dates_sha256(index):
 
 
 def load_shared_calendar(markets):
+    import hashlib
     import pandas as pd
     path = PROJECT_ROOT / 'data/processed/evaluation/qlike_intermediate.csv'
-    if file_sha256(path) != QLIKE_CALENDAR_SHA256:
+    calendar_bytes = path.read_bytes().replace(b'\r\n', b'\n')
+    if hashlib.sha256(calendar_bytes).hexdigest() != QLIKE_CALENDAR_SHA256:
         raise ValueError('The supplied shared QLIKE exclusion calendar has changed.')
     frame = pd.read_csv(path)
     frame['date'] = pd.to_datetime(frame['date']).dt.normalize()
