@@ -108,12 +108,32 @@
 <tr>
 <td><code>data/processed/evaluation/qlike_intermediate.csv</code></td>
 <td>Contains market-specific dates excluded from QLIKE evaluation under predefined filtering rules. <code>code/prepare_qlike_intermediate.py</code>. Regenerated data are saved to <code>results/generated/evaluation/qlike_intermediate.csv</code>.</td>
-<td>Used by the programs for Tables C.1–C.10, the separate programs for Tables 4–6, and <code>code/prepare_market_forecast_gains.py</code>.</td>
+<td>Used by the programs for Tables C.1–C.10, the combined program for Tables 4–6, and <code>code/prepare_market_forecast_gains.py</code>.</td>
 </tr>
 <tr>
 <td><code>data/processed/spillover/TCI_data_BK-TVP.csv</code></td>
 <td><code>code/prepare_spillover_indices.R</code>, using <code>data/raw/Return.csv</code></td>
 <td>Used by the programs for Tables 4, 7, C.1, C.3 and C.6, and by <code>code/prepare_qlike_intermediate.py</code>. Regenerated total and frequency-specific spillover indices are saved to <code>results/generated/spillover/TCI_data_BK-TVP.csv</code>.</td>
+</tr>
+<tr>
+<td><code>data/processed/table4/table4_mse/</code>; <code>data/processed/table4/table4_qlike/</code></td>
+<td>Saved MSE and QLIKE bootstrap draws for 18 markets, with one file per market and loss measure, which can be used to reproduce the results reported in Table 4 of the main text.</td>
+<td>With <code>TABLE4_USE_SAVED_SAMPLING = True</code>, the Table 4 program applies these draws to the losses it computes. With <code>False</code>, it draws new samples.</td>
+</tr>
+<tr>
+<td><code>data/processed/table6/fitted_weights.json.gz</code></td>
+<td>Fixed weights for CNN, LSTM and Transformer, with one set per model and market. These weights can be used to reproduce the results reported in Table 6 of the paper.</td>
+<td>With <code>TABLE6_USE_FROZEN_MODELS_AND_SAMPLING = True</code>, the Table 6 program uses these weights to generate forecasts from <code>data/raw/RV.csv</code> and <code>data/processed/centrality/P.csv</code>. With <code>False</code>, it retrains the three networks. Table 7 uses the same weights at all three VaR levels when <code>USE_FIXED_DEEP_MODELS = True</code>.</td>
+</tr>
+<tr>
+<td><code>data/processed/table6/mcs/MSE/</code>; <code>data/processed/table6/mcs/QLIKE/</code></td>
+<td>Saved MSE and QLIKE bootstrap draws for 18 markets, with one file per market and loss measure, which can be used to reproduce the results reported in Table 6 of the main text.</td>
+<td>With <code>TABLE6_USE_FROZEN_MODELS_AND_SAMPLING = True</code>, it uses the saved row positions to resample all models’  losses together for each market and loss measure. With <code>False</code>, it draws new samples.</td>
+</tr>
+<tr>
+<td><code>data/processed/table7/residual_sampling.csv</code>; <code>data/processed/table8/residual_sampling.csv</code></td>
+<td>One residual sampling plan per table. Each file records random seeds and sampling rules, which can be used to reproduce the results reported in Table 7 and 8 of the main text.</td>
+<td>The VaR program reads the corresponding file when <code>USE_FIXED_SAMPLING = True</code>. Section 6 explains how the plans were selected and used.</td>
 </tr>
 <tr>
 <td>Six <code>.IXIC_daily.csv</code> and <code>.KS11_daily.csv</code> files under <code>data/processed/Fig_04_VaR/</code></td>
@@ -211,8 +231,10 @@ conda run --no-capture-output -n centrality-reproduction python code/prepare_log
 <p><strong>Using the supplied intermediate data:</strong> Run the corresponding program listed in Section 6. Programs that require intermediate data read the supplied files in <code>data/processed/</code> by default.</p>
 <p><strong>Regenerating intermediate data:</strong> Run the generating programs listed in Section 3, preparing their required inputs first. Newly generated files are saved to <code>results/generated/</code>; subsequent programs do not automatically use them. To use these files consistently, work with a copy of the package and replace the corresponding files in <code>data/processed/</code> with the regenerated files, preserving their filenames and subfolder structure. Then run the dependent programs listed in Sections 3 and 6. Keep the original package and reference files unchanged.</p>
 <h2>6. Outputs and verification</h2>
-<p>For Tables 4, 5 and 6, small differences from the reference results in MCS counts and CNN, LSTM and Transformer forecasts can arise from bootstrap resampling, random initialization and training, and differences in software versions or computing environments.</p>
-<p>For Tables 7 and 8, differences from the reference results may arise from two sources: random residual resampling in VaR estimation, which uses 5000 bootstrap draws, and stochastic elements of model training, particularly neural-network weight initialization and training-sample shuffling. These sources of variation can affect VaR forecasts and, consequently, violation rates, losses, test outcomes and model rankings.</p>
+<p>The two switches at the top of <code>code/Tables_04_05_06_forecast_performance.py</code> control Tables 4 and 6 independently. Both default to <code>True</code>. With this setting, Table 4 computes forecasts and forecast errors, then uses the saved bootstrap draws and test settings for the MCS tests. Table 6 uses fixed weights to generate forecasts for CNN, LSTM and Transformer, computes forecasts for the other five models as usual, and uses the saved bootstrap draws for the MCS tests across all eight models. In other words, enabling both switches reproduces the results reported in Tables 4 and 6 of the paper.</p>
+<p>If you set either switch to <code>False</code> before running the program, it generates new bootstrap draws for that table. Setting the Table 6 switch to <code>False</code> also retrains the three neural networks. Both settings write the results to the same output files in <code>results/generated/</code>.</p>
+<p><strong>Tables 7 and 8.</strong> The two switches at the top of <code>code/Tables_07_08_VaR_backtesting.py</code> are independent. Both default to <code>True</code>.</p>
+<p>For MVF in Table 8, the three displayed violation rates use tail probabilities of 0.01, 0.05 and 0.10. The two losses use 0.012, 0.052 and 0.12, respectively, at the same three levels.</p>
 <p>For Fig. 2, the spring layout has no fixed random seed, so node positions may vary between runs. This affects only the visual arrangement, not the network connections or numerical calculations.</p>
 <p>For Fig. 4, regenerating the VaR data uses 5000 bootstrap draws without a fixed random seed, so forecasts may differ from the supplied results.</p>
 <p>For Tables C.1 through C.8, bootstrap resampling can produce different MCS counts. Random initialization and training can also affect the CNN, LSTM and Transformer results in Tables C.5 and C.8; software versions and computing environments may contribute to differences between runs.</p>
@@ -264,7 +286,7 @@ conda run --no-capture-output -n centrality-reproduction python code/prepare_log
 <td>Table 4</td>
 <td>Monthly forecast performance, Category 1 vs HAR</td>
 <td><code>code/Tables_04_05_06_forecast_performance.py</code></td>
-<td><code>data/raw/RV.csv</code>; <code>data/raw/Return.csv</code>; <code>data/processed/centrality/P.csv</code>; <code>data/processed/centrality/P_log.csv</code>; <code>data/processed/spillover/TCI_data_BK-TVP.csv</code></td>
+<td><code>data/raw/RV.csv</code>; <code>data/raw/Return.csv</code>; <code>data/processed/centrality/P.csv</code>; <code>data/processed/centrality/P_log.csv</code>; <code>data/processed/spillover/TCI_data_BK-TVP.csv</code><br>Additional inputs when <code>TABLE4_USE_SAVED_SAMPLING = True</code>: <code>data/processed/table4/table4_mse/</code> (MSE bootstrap draws); <code>data/processed/table4/table4_qlike/</code> (QLIKE bootstrap draws); <code>data/processed/evaluation/qlike_intermediate.csv</code></td>
 <td><code>results/generated/Table_04_category1_forecast_performance.xlsx</code></td>
 <td><code>results/Reference/tables/Table_04_category1_forecast_performance.xlsx</code></td>
 <td>p23; Section 4.4.1. Generating Tables 4, 5 and 6 together takes approximately 20 hours on our computer; runtime may vary across systems.</td>
@@ -282,7 +304,7 @@ conda run --no-capture-output -n centrality-reproduction python code/prepare_log
 <td>Table 6</td>
 <td>Monthly forecast performance, Category 3 vs HAR</td>
 <td><code>code/Tables_04_05_06_forecast_performance.py</code></td>
-<td><code>data/raw/RV.csv</code>; <code>data/raw/Return.csv</code>; <code>data/processed/centrality/P.csv</code>; <code>data/processed/centrality/P_log.csv</code>; <code>data/processed/spillover/TCI_data_BK-TVP.csv</code></td>
+<td><code>data/raw/RV.csv</code>; <code>data/raw/Return.csv</code>; <code>data/processed/centrality/P.csv</code>; <code>data/processed/centrality/P_log.csv</code>; <code>data/processed/spillover/TCI_data_BK-TVP.csv</code>; <code>data/processed/table6/fitted_weights.json.gz</code>; <code>data/processed/evaluation/qlike_intermediate.csv</code>; <code>data/processed/table6/mcs/MSE/</code>; <code>data/processed/table6/mcs/QLIKE/</code></td>
 <td><code>results/generated/Table_06_category3_forecast_performance.xlsx</code></td>
 <td><code>results/Reference/tables/Table_06_category3_forecast_performance.xlsx</code></td>
 <td>p26; Section 4.4.1. Generating Tables 4, 5 and 6 together takes approximately 20 hours on our computer; runtime may vary across systems.</td>
@@ -291,7 +313,7 @@ conda run --no-capture-output -n centrality-reproduction python code/prepare_log
 <td>Table 7</td>
 <td>VaR backtesting, HAR / HAR-CI / Categories 1 and 3</td>
 <td><code>code/Tables_07_08_VaR_backtesting.py</code></td>
-<td><code>data/raw/RV.csv</code>; <code>data/raw/Return.csv</code>; <code>data/processed/centrality/P.csv</code>; <code>data/processed/centrality/P_log.csv</code>; <code>data/processed/spillover/TCI_data_BK-TVP.csv</code></td>
+<td><code>data/raw/RV.csv</code>; <code>data/raw/Return.csv</code>; <code>data/processed/centrality/P.csv</code>; <code>data/processed/spillover/TCI_data_BK-TVP.csv</code><br>With <code>USE_FIXED_SAMPLING = True</code>: <code>data/processed/table7/residual_sampling.csv</code><br>With <code>USE_FIXED_DEEP_MODELS = True</code>: <code>data/processed/table6/fitted_weights.json.gz</code></td>
 <td><code>results/generated/Table_07_VaR_backtesting.xlsx</code></td>
 <td><code>results/Reference/tables/Table_07_VaR_backtesting.xlsx</code></td>
 <td>p29; Section 4.4.2. Generating Tables 7 and 8 together takes approximately 20 hours on our computer; runtime may vary across systems.</td>
@@ -300,7 +322,7 @@ conda run --no-capture-output -n centrality-reproduction python code/prepare_log
 <td>Table 8</td>
 <td>VaR backtesting, LogHAR / LogHAR-CI / Category 2</td>
 <td><code>code/Tables_07_08_VaR_backtesting.py</code></td>
-<td><code>data/raw/RV.csv</code>; <code>data/raw/Return.csv</code>; <code>data/processed/centrality/P.csv</code>; <code>data/processed/centrality/P_log.csv</code>; <code>data/processed/spillover/TCI_data_BK-TVP.csv</code></td>
+<td><code>data/raw/RV.csv</code>; <code>data/raw/Return.csv</code>; <code>data/processed/centrality/P_log.csv</code><br>With <code>USE_FIXED_SAMPLING = True</code>: <code>data/processed/table8/residual_sampling.csv</code></td>
 <td><code>results/generated/Table_08_VaR_backtesting.xlsx</code></td>
 <td><code>results/Reference/tables/Table_08_VaR_backtesting.xlsx</code></td>
 <td>p29; Section 4.4.2. Generating Tables 7 and 8 together takes approximately 20 hours on our computer; runtime may vary across systems.</td>

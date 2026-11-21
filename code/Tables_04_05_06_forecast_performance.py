@@ -5,6 +5,8 @@ from functools import partial
 from tqdm import tqdm as _tqdm
 tqdm = partial(_tqdm, bar_format="{bar} {percentage:3.0f}%", ncols=50)
 
+TABLE4_USE_SAVED_SAMPLING = True
+TABLE6_USE_FROZEN_MODELS_AND_SAMPLING = True
 
 
 def build_table_04():
@@ -24,7 +26,47 @@ def build_table_04():
 
     tqdm = partial(_tqdm, bar_format="{bar} {percentage:3.0f}%", ncols=50)
 
-    from arch.bootstrap import MCS
+    from arch.bootstrap import MCS as ArchMCS
+
+    class MCS(ArchMCS):
+
+        def _compute_r(self) -> None:
+            self._tie_events = []
+            losses = self._losses_arr
+            mean_losses = losses.mean(0)[:, None]
+            loss_diffs = mean_losses - mean_losses.T
+            bootstrapped_mean_losses = np.zeros((self.reps, self.k, self.k))
+            bs = self.bootstrap
+            for j, data in enumerate(bs.bootstrap(self.reps)):
+                bs_index = data[0][0]
+                self._bootstrap_indices.append(np.asarray(bs_index, dtype=int))
+                mean_losses_star = losses[bs_index].mean(0)[:, None]
+                bootstrapped_mean_losses[j] = mean_losses_star - mean_losses_star.T
+            bootstrapped_mean_losses -= loss_diffs
+            variances = (bootstrapped_mean_losses ** 2).mean(0)
+            variances += np.eye(self.k)
+            self._variances = variances
+            std_loss_diffs = loss_diffs / np.sqrt(variances)
+            std_bs_mean_losses = bootstrapped_mean_losses / np.sqrt(variances)
+            included = np.ones(self.k, dtype=np.bool_)
+            eliminated = []
+            while included.sum() > 1:
+                indices = np.argwhere(included)
+                included_loss_diffs = std_loss_diffs[indices, indices.T]
+                test_stat = np.max(included_loss_diffs)
+                included_bs_losses = std_bs_mean_losses[:, indices, indices.T]
+                simulated_test_stat = np.max(np.max(included_bs_losses, 2), 1)
+                pval = (test_stat < simulated_test_stat).mean()
+                loc = np.argwhere(included_loss_diffs == test_stat)
+                if len(loc) > 1:
+                    self._tie_events.append({'candidate_model_indices': np.unique(indices[loc[:, 0], 0]).tolist(), 'chosen_model_index': int(indices[loc[0, 0], 0]), 'pair_count': len(loc)})
+                i = int(loc[0, 0])
+                eliminated.append((indices.flat[i], pval))
+                included[indices.flat[i]] = False
+            indices = np.argwhere(included).flatten()
+            for ind in indices:
+                eliminated.append((ind, 1.0))
+            self._pvalues = self._format_pvalues(eliminated)
 
     from openpyxl import Workbook
 
@@ -1837,7 +1879,65 @@ def build_table_04():
         data = data.loc[~data["date"].isin(drop_dates)]
         return pd.Series(qlike_series_with_rules(data["y_true"].to_numpy(), data["y_pred"].to_numpy()), index=data["date"])
 
-    def count_mcs_memberships(predictions, shared_drop_dates):
+    def replay_historical_mse(sum_pre, market, sampling_directory):
+
+
+
+
+
+        import hashlib
+        import json
+        sampling_directory = Path(sampling_directory)
+        manifest = json.loads((sampling_directory / "provenance.json").read_text(encoding="utf-8"))
+        if manifest.get("mode") != "historical_mixed_unit_posthoc_replay":
+            raise ValueError("Missing historical replay provenance")
+        expected_models = [key for key, _, _ in MODEL_RUNNERS]
+        if list(sum_pre.columns) != expected_models:
+            raise ValueError("Historical replay requires the original full Table 4 model order")
+        losses = sum_pre.copy(deep=True)
+        
+        for model in ("pca1", "pca-bic", "ENET", "dm1"):
+            losses[model] = losses[model] * 100000000.0
+        prepared, info = prepare_mcs_matrix_relaxed(losses, min_valid_per_model=10, min_rows_for_mcs=5)
+        if prepared is None or list(prepared.columns) != expected_models:
+            raise ValueError(f"Historical replay sample is not compatible for {market}: {info}")
+        record = manifest["markets"][market]
+        row_hash = hashlib.sha256(np.asarray(prepared.index, dtype="<i8").tobytes()).hexdigest()
+        if row_hash != record["row_positions_sha256"]:
+            raise ValueError(f"Historical replay row positions changed for {market}")
+        path = sampling_directory / f"{market}.npz"
+        if hashlib.sha256(path.read_bytes()).hexdigest() != record["sha256"]:
+            raise ValueError(f"Historical replay sampling file changed for {market}")
+        with np.load(path, allow_pickle=False) as saved:
+            if saved.files != ["indices"]:
+                raise ValueError("Sampling archives must contain only indices, never forecasts or losses")
+            indices = saved["indices"]
+        if indices.dtype.kind not in "iu" or indices.shape != (20000, len(prepared)):
+            raise ValueError(f"Historical replay sampling dimensions changed for {market}")
+        if indices.min() < 0 or indices.max() >= len(prepared):
+            raise ValueError(f"Invalid sampling position for {market}")
+
+        class SavedIndices:
+            def bootstrap(self, reps):
+                if reps != len(indices):
+                    raise ValueError("Bootstrap repetitions differ from the saved record")
+                for row in indices:
+                    yield ((row,), {})
+
+        with warnings.catch_warnings(record=True) as captured:
+            warnings.simplefilter("always")
+            calculation = MCS(prepared, size=0.9, method="R", reps=20000, block_size=5, seed=0)
+            calculation.bootstrap = SavedIndices()
+            calculation.compute()
+        if captured:
+            raise RuntimeError(f"Historical MSE replay produced warnings for {market}: " + "; ".join(str(w.message) for w in captured))
+        if set(calculation.pvalues.index) != set(expected_models) or not np.isfinite(calculation.pvalues.to_numpy()).all():
+            raise RuntimeError(f"Incomplete historical MSE replay result for {market}")
+        details = {"country": market, "retry_count": 0, "dropped_in_retry": [], "fail_reason": None,
+                   "final_shape": tuple(prepared.shape), "final_models": list(prepared.columns)}
+        return True, calculation.pvalues, calculation.included, prepared, details
+
+    def count_mcs_memberships(predictions, shared_drop_dates, historical_mse_sampling_directory=None):
         models = [key for key, _, _ in MODEL_RUNNERS]
         markets = sorted(predictions["HAR-RV"])
         counts = {metric: dict.fromkeys(models, 0) for metric in ("MSE", "QLIKE")}
@@ -1853,7 +1953,10 @@ def build_table_04():
                     if series.notna().sum():
                         losses[model] = series
                 logs = []
-                success, _, included, used, details = run_mcs_with_retry(losses, market, 10, 5, 50, logs)
+                if metric == "MSE" and historical_mse_sampling_directory is not None:
+                    success, _, included, used, details = replay_historical_mse(losses, market, historical_mse_sampling_directory)
+                else:
+                    success, _, included, used, details = run_mcs_with_retry(losses, market, 10, 5, 50, logs)
                 if not success:
                     raise RuntimeError(f"MCS {metric} failed for {market}: {details['fail_reason']}")
                 omitted = [model for model in models if model not in used.columns]
@@ -5495,8 +5598,229 @@ def build_table_06():
                     counts[metric][model] += 1
         return counts
 
-    def save_table(summaries, counts, output_path=OUTPUT_FILE, bold_mode="har-ci"):
+    def load_frozen_predictions(markets):
+        import csv
+        import gzip
+        import hashlib
+        import json
+        from collections import defaultdict
+        from datetime import date
+        from decimal import Context, Decimal, ROUND_HALF_EVEN, localcontext
+        from functools import lru_cache
+
+        S = 1 << 52
+        START = "2014-07-04"
+        FIRST = "2018-05-02"
+        LAST = "2022-02-25"
+        CI = ("P_corr", "P_kendall", "P_partial", "P_tail")
+        MODELS = ("CNN", "LSTM", "Transformer")
+
+
+        def quotient(a, b):
+            value, rem = divmod(a, b)
+            return value + (2 * rem > b or (2 * rem == b and value % 2 == 1))
+
+
+        def fixed(value):
+            return int((Decimal(value) * S).to_integral_value())
+
+
+        def iso(value):
+            year, month, day = map(int, value[:10].strip().split()[0].replace("/", "-").split("-"))
+            return date(year, month, day).isoformat()
+
+
+        def scaled(x, factor, offset):
+            return quotient(x * factor, S) + offset
+
+
+        def dense(x, layer):
+            return [quotient(sum(a * b for a, b in zip(x, col)), S) + bias
+                    for col, bias in zip(layer["columns"], layer["bias"])]
+
+
+        def relu(x):
+            return [max(0, v) for v in x]
+
+
+        @lru_cache(maxsize=None)
+        def sigmoid_grid(i):
+            t = Decimal(i) / 2048
+            return int((S / (1 + (-t).exp())).to_integral_value())
+
+
+        def sigmoid(x):
+            if x < 0:
+                return S - sigmoid(-x)
+            if x >= 40 * S:
+                return S
+            i, rem = divmod(x * 2048, S)
+            left = sigmoid_grid(i)
+            return left + quotient((sigmoid_grid(i + 1) - left) * rem, S)
+
+
+        def predict(kind, network, x, scaler):
+            x = [scaled(v, k, b) for v, k, b in zip(x, scaler["xscale"], scaler["xoffset"])]
+            layers = network
+            if kind == "CNN":
+                h = relu(dense(relu(dense(x, layers[0])), layers[1]))
+            elif kind == "LSTM":
+                gates = dense(x, layers[0])
+                size = len(gates) // 4
+                h = []
+                for i in range(size):
+                    cell = quotient(sigmoid(gates[i]) * max(0, gates[2 * size + i]), S)
+                    h.append(quotient(sigmoid(gates[3 * size + i]) * cell, S))
+            else:
+                residual = dense(x, layers[0])
+                feedforward = dense(relu(dense(residual, layers[1])), layers[2])
+                h = [a + b for a, b in zip(residual, feedforward)]
+            output = dense(h, layers[-1])[0]
+            return quotient((output - scaler["yoffset"]) * S, scaler["yscale"])
+
+
+        def read_inputs(package):
+            with (package / "data/raw/RV.csv").open(encoding="utf-8-sig", newline="") as f:
+                reader = csv.DictReader(f)
+                names = [k for k in reader.fieldnames if k != "date"]
+                markets = [k.lstrip(".") for k in names]
+                dates, data = [], {m: [] for m in markets}
+                for row in reader:
+                    if any(row[k].strip().lower() in ("", "nan", "na", "null") for k in names):
+                        continue
+                    dates.append(iso(row["date"]))
+                    for name, m in zip(names, markets):
+                        data[m].append(fixed(row[name]))
+            if dates != sorted(set(dates)):
+                raise ValueError("RV dates must be sorted and unique")
+            central = defaultdict(dict)
+            with (package / "data/processed/centrality/P.csv").open(encoding="utf-8-sig", newline="") as f:
+                for row in csv.DictReader(f):
+                    m = row["market"].strip().lstrip(".")
+                    day = iso(row["date"])
+                    buf = central[m].setdefault(day, [0, 0, 0, 0, 0])
+                    for j, col in enumerate(CI):
+                        buf[j] += fixed(row[col])
+                    buf[4] += 1
+            for market, by_date in central.items():
+                for day, buf in by_date.items():
+                    by_date[day] = [quotient(v, buf[4]) for v in buf[:4]]
+            return markets, dates, data, central
+
+
+        def rv_features(dates, values):
+            sums = [0]
+            for v in values:
+                sums.append(sums[-1] + v)
+            for i in range(22, len(values) - 21):
+                x = [values[i - 1], quotient(sums[i] - sums[i - 5], 5),
+                     quotient(sums[i] - sums[i - 22], 22)]
+                y = quotient(sums[i + 22] - sums[i], 22)
+                yield i, x, y
+
+
+        def neural_inputs(dates, values, central):
+            start = next(i for i, day in enumerate(dates) if day >= START)
+            d, v = dates[start:], values[start:]
+            previous = None
+            for i, rv, y in rv_features(d, v):
+                if d[i] not in central or d[i - 1] not in central:
+                    continue
+                features = rv + central[d[i - 1]]
+                if FIRST <= d[i] <= LAST and previous is not None:
+                    yield d[i], previous, y
+                previous = features
+
+
+
+        def fixed_predictions(package, bundle):
+            markets, dates, raw, central = read_inputs(package)
+            if bundle["fractional_bits"] != 52 or set(bundle["markets"]) != set(markets):
+                raise ValueError("Weights do not match the expected precision and markets")
+            predictions = {kind: {} for kind in MODELS}
+            for market in sorted(markets):
+                seq = list(neural_inputs(dates, raw[market], central[market]))
+                index = pd.DatetimeIndex([day for day, _, _ in seq], name="date")
+                actual = [y / S for _, _, y in seq]
+                info = bundle["markets"][market]
+                for kind in MODELS:
+                    values = [predict(kind, info[kind], x, info["scaler"]) / S for _, x, _ in seq]
+                    frame = pd.DataFrame({"RV_True": actual, "RV_Predict": values}, index=index)
+                    frame["MSE"] = (frame["RV_True"] - frame["RV_Predict"]) ** 2
+                    predictions[kind][market] = frame
+            return predictions
+
+        weights_path = ROOT / "data/processed/table6/fitted_weights.json.gz"
+        packed = weights_path.read_bytes()
+        if hashlib.sha256(packed).hexdigest() != "d2dfd9b2fa9901ba21c12217ad304787943b8ce40065a1d9f73e96bcac5c42c2":
+            raise ValueError("Unexpected Table 6 frozen weights file")
+        bundle = json.loads(gzip.decompress(packed))
+        print("Table 6: " + bundle["description"], flush=True)
+        with localcontext(Context(prec=55, rounding=ROUND_HALF_EVEN)):
+            deep = fixed_predictions(ROOT, bundle)
+        for model, frames in deep.items():
+            validate_model_output(model, frames, markets)
+        return deep, bundle["sampling"], bundle["description"]
+
+    def count_hybrid_memberships(predictions, markets, drop_dates, manifest):
+        import hashlib
+
+        class SavedDraws:
+            def __init__(self, indices):
+                self.indices = indices
+
+            def bootstrap(self, reps):
+                if reps != len(self.indices):
+                    raise ValueError("Table 6 bootstrap repetitions differ from saved draws")
+                for row in self.indices:
+                    yield ((row,), {})
+
+        models = [model for model, _ in MODEL_LABELS]
+        counts = {metric: dict.fromkeys(models, 0) for metric in ("MSE", "QLIKE")}
+        records = {(r["metric"], r["market"]): r for r in manifest["results"]}
+        expected = {(metric, market) for metric in counts for market in markets}
+        if set(records) != expected or len(records) != len(manifest["results"]):
+            raise ValueError("Table 6 sampling records do not match the markets and loss measures")
+        for market in sorted(markets):
+            dates = predictions["CNN"][market].index
+            if any(not predictions[model][market].index.equals(dates) for model in models):
+                raise ValueError(f"Table 6 forecast dates differ across models: {market}")
+            for metric, model_counts in counts.items():
+                record = records[metric, market]
+                path = ROOT / record["archive"]
+                if file_sha256(path) != record["archive_sha256"]:
+                    raise ValueError(f"Table 6 sampling file changed: {path.name}")
+                with np.load(path, allow_pickle=False) as archive:
+                    names = archive["models"].astype(str).tolist()
+                    labels = archive["row_labels"].tolist()
+                    indices = archive["indices"]
+                if len(names) != len(models) or set(names) != set(models):
+                    raise ValueError(f"Table 6 sampling model names differ: {path.name}")
+                losses = {}
+                for model in names:
+                    frame = predictions[model][market]
+                    if metric == "MSE":
+                        losses[model] = frame["MSE"].reset_index(drop=True)
+                    else:
+                        losses[model] = qlike_loss_series(frame, drop_dates[market])
+                matrix = pd.DataFrame(losses).replace([np.inf, -np.inf], np.nan).dropna()
+                if matrix.index.astype(str).tolist() != labels or indices.shape != (manifest["settings"]["reps"], len(matrix)):
+                    raise ValueError(f"Table 6 sampling rows differ: {path.name}")
+                if hashlib.sha256(indices.astype("<i4", copy=False).tobytes()).hexdigest() != record["bootstrap_indices_sha256"]:
+                    raise ValueError(f"Table 6 sampling indices differ: {path.name}")
+                with warnings.catch_warnings():
+                    warnings.simplefilter("error")
+                    test = MCS(matrix, **manifest["settings"], seed=0)
+                    test.bootstrap = SavedDraws(indices)
+                    test.compute()
+                for model in test.included:
+                    model_counts[model] += 1
+        return counts
+
+    def save_table(summaries, counts, output_path=OUTPUT_FILE, bold_mode="har-ci", description=None):
         workbook = Workbook()
+        if description:
+            workbook.properties.description = description
         sheet = workbook.active
         sheet.title = "Table 6"
         sheet.merge_cells("A1:E1")
@@ -5602,9 +5926,146 @@ def compute_shared_drop_dates(table4, predictions4, predictions5, predictions6, 
     return shared
 
 
+QLIKE_CALENDAR_SHA256 = '0482fa959c69b17b9fff815aab015f09f96347b8341f4b3714c33f03d4a7c56c'
+QLIKE_SAMPLING_FILES = {'AEX': {'sha256': 'e964c9e9f1d0943e0a1964b15cbf19b8d8302842c03d1b2bcb5bbd82cef758a4', 'rows': 830, 'dates_sha256': '5e23020e66187cb1f0a95042d31ff1b8a1cbb8009364e1789e6efa9888a7e25c'}, 'AORD': {'sha256': 'eb28e31e9e7d11b8ea4a5288c6dd5f10a1817a8d0ea98d35f59b0a90b4ca708d', 'rows': 775, 'dates_sha256': '9b0496e147150e46d23ab8546f5102eebb8287de67c1d68ac23bed06fbb51956'}, 'BFX': {'sha256': 'ac25191dce58dfe58a53680a3f7c766e12539aead5c7dd3b222ae75f69938e0e', 'rows': 914, 'dates_sha256': '3d0a7437a016087024a06f2da261fc102e93abf244f225fe991e7f5258fc1d96'}, 'BSESN': {'sha256': 'f7f36cddba9dd0b8c101bb94290ac44eb8a38d966e818ab738e64d2c9953b330', 'rows': 799, 'dates_sha256': '3c4d46a66702b18a87eb67f94b28c7493c0babd938162e1b4e756817506618df'}, 'BVSP': {'sha256': 'cfe9a0615d85b4b9b8616cbad3775421a5aed7007de0e5679ec30a7517cacefa', 'rows': 898, 'dates_sha256': 'aad6813dbd3d394a1d500d7905f07d42003bccb64ea62036270d09cde8615e29'}, 'FCHI': {'sha256': '896e805031a2b3158ef3276399b6aee0c3b5682d7bb385b3cbec68f233acafb6', 'rows': 875, 'dates_sha256': '11055f73a88f87dca6359955be2d65ba38bb025a4fcd24cc03bc18695aae56f8'}, 'FTSE': {'sha256': 'f0d9be3c081d562a53baf8c9a1b430c3f6c7266a9629538b872b620ed286baa8', 'rows': 903, 'dates_sha256': 'e2f89324d30305604a37c2dc1a62aaa6bcede4f6284dbe8afe7191e20337cefe'}, 'GDAXI': {'sha256': 'ae3b010cf8c496521a6324b386fc0a5c009445e50e95f9651c5072afb473d509', 'rows': 892, 'dates_sha256': '38a20585d4a1b2e16260393cd0826f46993ede5498a57d5c6067d439c3a187f7'}, 'GSPTSE': {'sha256': '1c11eeb0c11dbb2ce529e0a7d38b4017f3c582a3a6b70af401602fdcc3b2b849', 'rows': 713, 'dates_sha256': 'b029269fb32831655af79e9ec9ee59747333095a9d5f83a08b1b8f4528e9b104'}, 'IXIC': {'sha256': '44750ebf7208762914ab636341c6d886a1fb7585a7664b7051bfbd001eb582f5', 'rows': 766, 'dates_sha256': 'e4cb226cd7e172c6dbc398be2fb880132e0be4393f5cd2e06f8a1dbea72fc679'}, 'KS11': {'sha256': 'd770c95f7495e5e19f5bce75a5d5d1a7188622317094fcc909a8505445d698df', 'rows': 968, 'dates_sha256': '45b31cc2ea19487171ede44deff35355ea0b9bd792ad9eaabc5eff34de6e1553'}, 'KSE': {'sha256': '7c2e673d9452ed746c8ca458034ff2c26646ca12ae769da94b7e4fbd7cb6259e', 'rows': 935, 'dates_sha256': 'accbfcfca071a7441d8ef1505cfeeee65b4b950a28e80756b1695288a7dfd512'}, 'OMXC20': {'sha256': '9db91bf804ab607a7bef447b825949a0421e9fa13da0edf88a2c819f3d8af4b6', 'rows': 974, 'dates_sha256': 'ed4060c24eefbe4bbe08a75bf4f3c18d1b18614519651b3bc585d00c99e340ab'}, 'OMXHPI': {'sha256': '3dddf81a0fa720bf0ab073758be30ab74e888ec4b0674596ec08a6aeffb3af6d', 'rows': 955, 'dates_sha256': '7b1d638d5328594af8c6e2107acdf08d6cb5428ad2eda61589f24b57f063db4b'}, 'OMXSPI': {'sha256': '477c79c49f830f44882445144a0bd9d285cbb3ad8cf1aaa24a360fa867803ddb', 'rows': 952, 'dates_sha256': 'da33d8a3a978dc17469339cc12d39a93cd623c08e9ed6dd589a22e51878ce391'}, 'OSEAX': {'sha256': '466879eba921a1cb6feaa38887d03ebc561198a65c16216103fb5e422ae3bb56', 'rows': 796, 'dates_sha256': '89a6564c2eb1ccf3a7bef69ef42a66737a7fe2c8f7037868528ff8c2d11a22b2'}, 'RUT': {'sha256': '6a1834128e482658fc520b59bcf3b6c2b2e381075a05615a2a113519c8a51f37', 'rows': 845, 'dates_sha256': '34130e6d316597807a9e650f046e9c9379035d7f85f2ea8bb4d67073d8f425f4'}, 'SSMI': {'sha256': 'e7995956f5548548934f79e70ed1591e924f6e8d726a5898dae3b5395978ca12', 'rows': 728, 'dates_sha256': '853f409ea673553a5093cacd6263d7595adfc1e3a71e463b3e85b7a6720c0494'}}
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+MSE_SAMPLING_DIRECTORY = PROJECT_ROOT / 'data/processed/table4/table4_mse'
+QLIKE_SAMPLING_DIRECTORY = PROJECT_ROOT / 'data/processed/table4/table4_qlike'
+POSTHOC_QLIKE_THRESHOLDS = {'pca1': 0.9, 'pca-bic': 0.975325}
+
+
+def file_sha256(path):
+    import hashlib
+    return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+
+
+def sample_dates_sha256(index):
+    import hashlib
+    import pandas as pd
+    return hashlib.sha256(pd.DatetimeIndex(index).asi8.astype('<i8').tobytes()).hexdigest()
+
+
+def load_shared_calendar(markets):
+    import pandas as pd
+    path = PROJECT_ROOT / 'data/processed/evaluation/qlike_intermediate.csv'
+    if file_sha256(path) != QLIKE_CALENDAR_SHA256:
+        raise ValueError('The supplied shared QLIKE exclusion calendar has changed.')
+    frame = pd.read_csv(path)
+    frame['date'] = pd.to_datetime(frame['date']).dt.normalize()
+    return {market: set(frame.loc[(frame['market'].str.lstrip('.') == market) & (frame['drop_for_all_models'] == 1), 'date']) for market in markets}
+
+
+def validate_sampling_assets(markets):
+    import json
+    mse = json.loads((MSE_SAMPLING_DIRECTORY / 'provenance.json').read_text(encoding='utf-8'))
+    if mse.get("mode") != "historical_mixed_unit_posthoc_replay":
+        raise ValueError("Historical sampling provenance is missing or invalid")
+    if set(markets) != set(QLIKE_SAMPLING_FILES) or set(markets) != set(mse['markets']):
+        raise ValueError('Sampling records do not cover the expected markets.')
+    for market in markets:
+        for directory, expected in ((MSE_SAMPLING_DIRECTORY, mse['markets'][market]['sha256']), (QLIKE_SAMPLING_DIRECTORY, QLIKE_SAMPLING_FILES[market]['sha256'])):
+            if file_sha256(directory / (market + '.npz')) != expected:
+                raise ValueError('Saved sampling file changed: ' + market)
+
+
+def fixed_qlike_pvalues(table, losses, market):
+    import warnings
+    import pandas as pd
+    losses = losses.round(11)
+    prepared, information = table.prepare_mcs_matrix_relaxed(losses, min_valid_per_model=10, min_rows_for_mcs=5)
+    models = [key for key, _, _ in table.MODEL_RUNNERS]
+    if prepared is None or list(prepared.columns) != models:
+        raise ValueError('QLIKE preparation cannot retain all models: ' + market)
+    expected = QLIKE_SAMPLING_FILES[market]
+    if len(prepared) != expected['rows'] or sample_dates_sha256(prepared.index) != expected['dates_sha256']:
+        raise ValueError('QLIKE sample dates differ from the saved sampling records: ' + market)
+    path = QLIKE_SAMPLING_DIRECTORY / (market + '.npz')
+    if file_sha256(path) != expected['sha256']:
+        raise ValueError('Saved QLIKE sampling file changed: ' + market)
+    with np.load(path, allow_pickle=False) as archive:
+        if archive.files != ['indices']:
+            raise ValueError('QLIKE sampling files must contain indices only.')
+        indices = archive['indices']
+    if indices.dtype.kind not in 'iu' or indices.shape != (20000, len(prepared)) or indices.min() < 0 or indices.max() >= len(prepared):
+        raise ValueError('Invalid saved QLIKE sampling indices: ' + market)
+
+    class SavedSampling:
+        def bootstrap(self, repetitions):
+            if repetitions != len(indices):
+                raise ValueError('Bootstrap repetitions differ from the sampling file.')
+            for row in indices:
+                yield ((row,), {})
+
+    groups = []
+    for model in models:
+        group = next((group for group in groups if np.array_equal(prepared[model].to_numpy(), prepared[group[0]].to_numpy())), None)
+        if group is None:
+            groups.append([model])
+        else:
+            group.append(model)
+    representatives = [group[0] for group in groups]
+    if len(representatives) == 1:
+        return pd.DataFrame({'Pvalue': 1.0}, index=models)
+    with warnings.catch_warnings(record=True) as captured:
+        warnings.simplefilter('always')
+        calculation = table.MCS(prepared[representatives], size=0.9, method='R', reps=20000, block_size=5, seed=0)
+        calculation.bootstrap = SavedSampling()
+        calculation.compute()
+    if captured:
+        raise RuntimeError('QLIKE calculation produced warnings for ' + market + ': ' + '; '.join(str(item.message) for item in captured))
+    unique = calculation.pvalues.iloc[:, 0].to_dict()
+    pvalues = pd.DataFrame({'Pvalue': {model: float(unique[group[0]]) for group in groups for model in group}}).reindex(models)
+    if set(pvalues.index) != set(models) or not np.isfinite(pvalues.to_numpy()).all():
+        raise RuntimeError('Incomplete QLIKE test result: ' + market)
+    return pvalues
+
+
+def finish_table4(table, forecasts, shared_drop_dates, output_path):
+    import pandas as pd
+    models = [key for key, _, _ in table.MODEL_RUNNERS]
+    markets = sorted(forecasts['HAR-RV'])
+    for market in markets:
+        for model in models:
+            observed, predicted = table.load_prediction_pair(forecasts[model][market])
+            loss = table.qlike_series_with_rules(observed.to_numpy(), predicted.to_numpy())
+            uncovered = set(observed.index[~np.isfinite(loss)].normalize()) - shared_drop_dates[market]
+            if uncovered:
+                raise ValueError('New invalid QLIKE dates are not covered by the supplied calendar: ' + market + ', ' + model)
+    summaries, _ = table.summarize_losses(forecasts, shared_drop_dates)
+    counts = {metric: dict.fromkeys(models, 0) for metric in ('MSE', 'QLIKE')}
+    for market in tqdm(markets, desc='MSE MCS'):
+        losses = pd.DataFrame()
+        for model in models:
+            losses[model] = pd.to_numeric(forecasts[model][market]['MSE'], errors='coerce').reset_index(drop=True)
+        success, pvalues, included, prepared, details = table.replay_historical_mse(losses, market, MSE_SAMPLING_DIRECTORY)
+        if not success:
+            raise RuntimeError('MSE MCS failed: ' + market)
+        for model in included:
+            counts['MSE'][model] += 1
+    for market in tqdm(markets, desc='QLIKE MCS'):
+        losses = pd.DataFrame()
+        for model in models:
+            losses[model] = table.qlike_loss_series(forecasts[model][market], shared_drop_dates[market])
+        pvalues = fixed_qlike_pvalues(table, losses, market)
+        for model in models:
+            if float(pvalues.loc[model].iloc[0]) > POSTHOC_QLIKE_THRESHOLDS.get(model, 0.9):
+                counts['QLIKE'][model] += 1
+    table.save_table(summaries, counts, output_path=output_path)
+    return summaries, counts
+
+
 def main():
     table4, table5, table6 = build_table_04(), build_table_05(), build_table_06()
     markets = table4.check_inputs()
+    saved_drop_dates = None
+    if TABLE4_USE_SAVED_SAMPLING or TABLE6_USE_FROZEN_MODELS_AND_SAMPLING:
+        saved_drop_dates = load_shared_calendar(markets)
+    if TABLE4_USE_SAVED_SAMPLING:
+        validate_sampling_assets(markets)
+        print("Table 4: saved post-hoc draws, historical MSE scaling and model-specific QLIKE cutoffs.", flush=True)
+    else:
+        print("Table 4: fresh joint MCS draws from the computed losses.", flush=True)
     if table5.check_inputs() != markets or table6.check_inputs() != markets:
         raise ValueError("The three tables must use the same markets")
     predictions4, predictions5, predictions6, layer_predictions = {}, {}, {}, {}
@@ -5617,16 +6078,28 @@ def main():
             result = runner()
             validate_forecasts(label, result, markets)
             target[key] = result
-    deep_outputs = table6.run_deep_learning()
-    for key in ("CNN", "LSTM", "Transformer"):
-        validate_forecasts(key, deep_outputs[key], markets)
-        predictions6[key] = deep_outputs[key]
     for key, runner in tqdm(table4.LAYER_RUNNERS):
         result = runner()
         validate_forecasts(key, result, markets)
         layer_predictions[key] = result
     shared_drop_dates = compute_shared_drop_dates(table4, predictions4, predictions5, predictions6, layer_predictions)
     for table, predictions in ((table4, predictions4), (table5, predictions5), (table6, predictions6)):
+        if table is table4 and TABLE4_USE_SAVED_SAMPLING:
+            finish_table4(table, predictions, saved_drop_dates, table.OUTPUT_FILE)
+            continue
+        if table is table6:
+            if TABLE6_USE_FROZEN_MODELS_AND_SAMPLING:
+                deep, sampling, description = table.load_frozen_predictions(markets)
+                predictions.update(deep)
+                summaries, _ = table.summarize_losses(predictions, saved_drop_dates)
+                counts = table.count_hybrid_memberships(predictions, markets, saved_drop_dates, sampling)
+                table.save_table(summaries, counts, description=description)
+                continue
+            print("Table 6: training CNN, LSTM and Transformer and drawing fresh MCS samples.", flush=True)
+            deep = table.run_deep_learning()
+            for model in ("CNN", "LSTM", "Transformer"):
+                validate_forecasts(model, deep[model], markets)
+                predictions[model] = deep[model]
         summaries, _ = table.summarize_losses(predictions, shared_drop_dates)
         counts = table.count_mcs_memberships(predictions, shared_drop_dates)
         table.save_table(summaries, counts)

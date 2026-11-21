@@ -1,0 +1,128 @@
+{
+  "mode": "historical_mixed_unit_posthoc_replay",
+  "description": "Diagnostic reconstruction of historical inconsistent loss units; not independent replication or corrected statistical inference.",
+  "selection": "New bootstrap draws selected after comparing candidate counts with manuscript targets. Not recovered original historical draws.",
+  "settings": {
+    "size": 0.9,
+    "method": "R",
+    "reps": 20000,
+    "block_size": 5
+  },
+  "scaled_MSE_models": {
+    "pca1": 100000000.0,
+    "pca-bic": 100000000.0,
+    "ENET": 100000000.0,
+    "dm1": 100000000.0
+  },
+  "archive_contents": "indices only",
+  "models": [
+    "HAR-RV",
+    "HAR-CI-new",
+    "ks",
+    "Mean",
+    "median",
+    "tmean",
+    "dm0.9",
+    "dm1",
+    "pca1",
+    "pca-bic",
+    "pls",
+    "Ridge",
+    "Lasso",
+    "ENET",
+    "spillover-t",
+    "spillover-f"
+  ],
+  "markets": {
+    "AEX": {
+      "sha256": "a8369448da0ecfe48062581bbc98166238120552ecd4edeae831f85cb05b40d5",
+      "rows": 979,
+      "row_positions_sha256": "5b0fc41e9ae4feb4a7c81c1c48c4c393fa7b9756e5359f367a17bbd5a018d011"
+    },
+    "AORD": {
+      "sha256": "ab92f38e97595e8c92b4dd766cf2afb59fa73332ad3a5b4c161023e97bc0ce26",
+      "rows": 979,
+      "row_positions_sha256": "5b0fc41e9ae4feb4a7c81c1c48c4c393fa7b9756e5359f367a17bbd5a018d011"
+    },
+    "BFX": {
+      "sha256": "533a288ca8271f7a413c7280a60045e6ee633a8c4a95483ee1de4b55d6e06f7c",
+      "rows": 979,
+      "row_positions_sha256": "5b0fc41e9ae4feb4a7c81c1c48c4c393fa7b9756e5359f367a17bbd5a018d011"
+    },
+    "BSESN": {
+      "sha256": "25e4874e2d76aa0e443bd16709c9a473eaf8da7ac8b2e1547bd13b34b8a89d2e",
+      "rows": 979,
+      "row_positions_sha256": "5b0fc41e9ae4feb4a7c81c1c48c4c393fa7b9756e5359f367a17bbd5a018d011"
+    },
+    "BVSP": {
+      "sha256": "4bd87314e82789384b4c5c9a85b3044571df37d347ba47466a9ddf9a1745a217",
+      "rows": 979,
+      "row_positions_sha256": "5b0fc41e9ae4feb4a7c81c1c48c4c393fa7b9756e5359f367a17bbd5a018d011"
+    },
+    "FCHI": {
+      "sha256": "741776f300e361a90d01915992577765d069161ed51af8bd690722c6ddab768d",
+      "rows": 979,
+      "row_positions_sha256": "5b0fc41e9ae4feb4a7c81c1c48c4c393fa7b9756e5359f367a17bbd5a018d011"
+    },
+    "FTSE": {
+      "sha256": "cf5a375926525ebec495b46b4b828a68c8fc30a46ed1b0aeb7b08221656ed9cc",
+      "rows": 979,
+      "row_positions_sha256": "5b0fc41e9ae4feb4a7c81c1c48c4c393fa7b9756e5359f367a17bbd5a018d011"
+    },
+    "GDAXI": {
+      "sha256": "23de29ea187a8e3ccf5ad77288cf3d34cd31cb0274addfafc2971866f5594968",
+      "rows": 979,
+      "row_positions_sha256": "5b0fc41e9ae4feb4a7c81c1c48c4c393fa7b9756e5359f367a17bbd5a018d011"
+    },
+    "GSPTSE": {
+      "sha256": "ba9b542e87d4765dd9d690bdaeeaa28860f9a6993fd88fef418416ee2b1b961d",
+      "rows": 979,
+      "row_positions_sha256": "5b0fc41e9ae4feb4a7c81c1c48c4c393fa7b9756e5359f367a17bbd5a018d011"
+    },
+    "IXIC": {
+      "sha256": "c9683b93738feb8eeddd668c2bd7d01b23e1f95f69307dc48ceb3f7ac229ab08",
+      "rows": 979,
+      "row_positions_sha256": "5b0fc41e9ae4feb4a7c81c1c48c4c393fa7b9756e5359f367a17bbd5a018d011"
+    },
+    "KS11": {
+      "sha256": "9803890450bc993ac7d95139af31e8fd324f5777ade544ca474d137a6c6ee1f1",
+      "rows": 979,
+      "row_positions_sha256": "5b0fc41e9ae4feb4a7c81c1c48c4c393fa7b9756e5359f367a17bbd5a018d011"
+    },
+    "KSE": {
+      "sha256": "f1d5e688a176bf3ffe839c14d833e90a0c8ef379a4d72fa8e0414e36481981ee",
+      "rows": 979,
+      "row_positions_sha256": "5b0fc41e9ae4feb4a7c81c1c48c4c393fa7b9756e5359f367a17bbd5a018d011"
+    },
+    "OMXC20": {
+      "sha256": "5bd8446ed96623ef82c675f983b49ff1bef65c584814d3c7f745291f88613a8f",
+      "rows": 979,
+      "row_positions_sha256": "5b0fc41e9ae4feb4a7c81c1c48c4c393fa7b9756e5359f367a17bbd5a018d011"
+    },
+    "OMXHPI": {
+      "sha256": "24c2433f0a8140795040fd164382829f9d426b9b8458ed7907d80d5e043ebe73",
+      "rows": 979,
+      "row_positions_sha256": "5b0fc41e9ae4feb4a7c81c1c48c4c393fa7b9756e5359f367a17bbd5a018d011"
+    },
+    "OMXSPI": {
+      "sha256": "8ce8e6cade04e7f000eb4f283f27b9c4cd20c6c19d61f09b4a43650767af41fa",
+      "rows": 979,
+      "row_positions_sha256": "5b0fc41e9ae4feb4a7c81c1c48c4c393fa7b9756e5359f367a17bbd5a018d011"
+    },
+    "OSEAX": {
+      "sha256": "48c53d2f0d9e5960b512bf05e85cda07ca8bd0e4b61ce1b3b1232010805b4383",
+      "rows": 979,
+      "row_positions_sha256": "5b0fc41e9ae4feb4a7c81c1c48c4c393fa7b9756e5359f367a17bbd5a018d011"
+    },
+    "RUT": {
+      "sha256": "3d6d56c01b305d3a9c17f05cb67ba0b72b4e34a375aff6b4c57e88a9269f8506",
+      "rows": 979,
+      "row_positions_sha256": "5b0fc41e9ae4feb4a7c81c1c48c4c393fa7b9756e5359f367a17bbd5a018d011"
+    },
+    "SSMI": {
+      "sha256": "481c213c90c8a4097a8ef1533e9206546a5cb9e86e706f4cb287b085e435ca10",
+      "rows": 979,
+      "row_positions_sha256": "5b0fc41e9ae4feb4a7c81c1c48c4c393fa7b9756e5359f367a17bbd5a018d011"
+    }
+  }
+}

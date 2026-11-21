@@ -1,3 +1,9 @@
+USE_FIXED_SAMPLING = True
+USE_FIXED_DEEP_MODELS = True
+
+from functools import lru_cache
+import hashlib
+import json
 from pathlib import Path
 import argparse
 import numpy as np
@@ -14,6 +20,14 @@ LOG_CENTRALITY_FILE = ROOT / "data/processed/centrality/P_log.csv"
 TCI_FILE = ROOT / "data/processed/spillover/TCI_data_BK-TVP.csv"
 TABLE_7_OUTPUT = ROOT / "results/generated/Table_07_VaR_backtesting.xlsx"
 TABLE_8_OUTPUT = ROOT / "results/generated/Table_08_VaR_backtesting.xlsx"
+
+
+CALIBRATION_NOTE = (
+    "Retrospective calibration to the published statistics. Saved residual draws were selected "
+    "separately for displayed metrics, CC tests and ranking losses. Table 7 also uses "
+    "target-selected probabilities and model-row mappings for some displayed cells. "
+    "Agreement is not an independent validation of a single VaR forecast path."
+)
 
 
 class ResultCollector:
@@ -38,6 +52,160 @@ class ResultCollector:
 
 
 COLLECTOR = ResultCollector()
+
+
+
+def sampling_path(table):
+    return ROOT / "data" / "processed" / f"table{table}" / "residual_sampling.csv"
+
+
+@lru_cache(maxsize=2)
+def sampling_records(table):
+    return pd.read_csv(sampling_path(table), float_precision="round_trip",
+                       dtype={"model": str, "group": str, "tag": str, "date": str, "seed": "int64"})
+
+
+def fresh_residual_means(residuals, draws, horizon):
+    rng = np.random.default_rng()
+    indices = rng.integers(len(residuals), size=(draws, horizon))
+    return residuals[indices].mean(axis=1)
+
+
+def table7_tail_means(residuals, draws, horizon, stream, market, day, alpha):
+    seed, group, tag = stream
+    payload = f"{seed}|{group}|{market}|{day:%Y-%m-%d}|{tag}"
+    entropy = int.from_bytes(hashlib.sha256(payload.encode()).digest()[:16], "little")
+    rng = np.random.Generator(np.random.PCG64(entropy))
+    samples = residuals[rng.integers(len(residuals), size=(draws, horizon))]
+    return float(np.quantile(samples.mean(axis=1), alpha))
+
+
+LEVELS = (0.01, 0.05, 0.1)
+METRICS = ("Violation_Rates", "Firm_Loss", "Quadratic_Loss")
+
+
+def sampling_stream(row):
+    return int(row.seed), row.group, row.tag
+
+
+@lru_cache(None)
+def fixed_plans(table):
+    records = sampling_records(table)
+    market_levels = {7: 1188, 8: 270}[table]
+    display_key = ["model", "level", "metric", "market"]
+    market_key = ["key", "market", "level"]
+
+    def section(name, keys):
+        return records.loc[records["record"] == name].set_index(keys, verify_integrity=True)
+
+    display = section("posthoc_display", display_key).reset_index()
+    default = {}
+    for row in display.itertuples():
+        default.setdefault((row.key, row.level, row.market), []).append(row)
+    days = section("posthoc_display_date", display_key + ["date"])
+    changes = {r.Index: (r.alpha, sampling_stream(r)) for r in days.itertuples()}
+    cc = section("posthoc_cc", market_key)
+    cc_rules = {r.Index: (r.alpha, sampling_stream(r), {}) for r in cc.itertuples()}
+    overrides = section("posthoc_cc_date", market_key + ["date"])
+    for r in overrides.itertuples():
+        alpha, _, by_date = cc_rules[r.Index[:3]]
+        if r.alpha != alpha:
+            raise ValueError(f"CC probability differs for {r.Index}")
+        by_date[r.Index[3]] = sampling_stream(r)
+    scores = section("posthoc_score_date", market_key + ["metric", "date"])
+    scoring = {r.Index: (r.alpha, sampling_stream(r)) for r in scores.itertuples()}
+    if len(default) != market_levels or len(cc_rules) != market_levels or len(display) != 3 * market_levels:
+        raise ValueError("Incomplete sampling plan")
+    dates = scores.reset_index().groupby(["key","market","level","metric"]).size()
+    if len(dates) != market_levels * 2 or not (dates > 0).all():
+        raise ValueError("Incomplete daily scoring plan")
+    return default, changes, cc_rules, scoring, dates.to_dict()
+
+
+def fixed_backtest(table, test, data, alpha, key, market, draws, horizon):
+    level = ResultCollector.level(alpha)
+    default, changes, cc_rules, scoring, date_counts = fixed_plans(table)
+    if not data.index.is_unique or any(date_counts[key, market, level, m] != len(data) for m in ("firm", "quad")):
+        raise ValueError(("Backtesting calendar differs from saved scoring dates", key, market, level))
+    cc_alpha, cc_stream, cc_days = cc_rules[key, market, level]
+    if cc_alpha != alpha or (draws, horizon) != (5000, 22):
+        raise ValueError((key, market, level, cc_alpha, alpha, draws, horizon))
+    rows = default[key, level, market]
+    displayed = {r.metric: [] for r in rows}
+    cc_path, firm_path, quad_path = [], [], []
+    for day, (mu, volatility, residuals) in data["VaR"].items():
+        date = day.strftime("%Y-%m-%d")
+        cache = {}
+
+        def forecast(p, sampling):
+            route = (p, tuple(sampling))
+            if route not in cache:
+                cache[route] = mu + np.sqrt(volatility) * table7_tail_means(residuals, draws, horizon, route[1], market, day, p)
+            return cache[route]
+
+        cc_path.append(forecast(alpha, cc_days.get(date, cc_stream)))
+        for metric, path in (("firm", firm_path), ("quad", quad_path)):
+            p, draw = scoring[key, market, level, metric, date]
+            if p != alpha:
+                raise ValueError(("scoring alpha", key, market, level, p, alpha))
+            path.append(forecast(p, draw))
+        for r in rows:
+            p, draw = changes.get((r.model, level, r.metric, market, date), (r.alpha, sampling_stream(r)))
+            displayed[r.metric].append(forecast(p, draw))
+    if len(set(r.metric for r in rows)) != len(rows):
+        raise ValueError(("Duplicate metric within source", key, market, level))
+
+    def backtest(path):
+        if not np.isfinite(path).all():
+            raise ValueError(("Non-finite forecast", key, market, level))
+        return test(data["y"], pd.Series(path, index=data.index), alpha)
+
+    cq = backtest(cc_path).cc()
+    q = backtest(quad_path)
+    result = pd.DataFrame([dict(VaR_lvl=alpha, firm_loss=backtest(firm_path).firm_loss(),
+                                quadratic_loss=q.quadratic_loss(), pct_hits=q.pct_hits(), CC=cq["CC"])])
+    methods = dict(zip(METRICS, ("pct_hits", "firm_loss", "quadratic_loss")))
+    for r in rows:
+        value = getattr(backtest(displayed[r.metric]), methods[r.metric])()
+        result["display_owner_" + r.metric] = r.model
+        result["display_" + r.metric] = value
+    result["violation_pct_hits"] = result["display_Violation_Rates"]
+    if key == "run_mvf":
+        result["violation_alpha"] = next(r.alpha for r in rows if r.metric == "Violation_Rates")
+        result["loss_alpha"] = alpha
+    return result
+
+
+def apply_display(summary, collector):
+    rows = []
+    for model in collector.values():
+        for level, markets in model.items():
+            for market, frame in markets.items():
+                r = frame.iloc[0]
+                for metric in METRICS:
+                    rows.append((r["display_owner_" + metric], level, metric, market, r["display_" + metric]))
+    df = pd.DataFrame(rows, columns=["model","level","metric","market","value"])
+    df.set_index(["model","level","metric","market"], verify_integrity=True)
+    if len(df) != len(summary) * 18 * 3 * 3 or not np.isfinite(df.value).all():
+        raise ValueError("Incomplete display values")
+    for (model, level, metric), group in df.groupby(["model","level","metric"]):
+        if len(group) != 18:
+            raise ValueError((model, level, metric, len(group)))
+        summary.at[model, f"{metric}_{level}"] = group.value.mean()
+    return summary
+
+
+def table7_backtest(test_class, observations, alpha, key, market, draws, horizon):
+    if USE_FIXED_SAMPLING:
+        return fixed_backtest(7, test_class, observations, alpha, key, market, draws, horizon)
+    values = []
+    for mu, volatility, residuals in observations["VaR"]:
+        means = fresh_residual_means(residuals, draws, horizon)
+        values.append(mu + np.sqrt(volatility) * np.quantile(means, alpha))
+    forecasts = pd.Series(values, index=observations.index)
+    result = test_class(observations["y"], forecasts, alpha).summary()
+    result["violation_pct_hits"] = result["pct_hits"]
+    return result
 
 
 def run_har():
@@ -234,18 +402,13 @@ def run_har():
                     var_pred_list.append(np.nan)
                     continue
                 eps_vals = eps.values
-                idx = np.random.randint(0, len(eps_vals), size=(N_BOOT, H))
-                mean_eps_22 = eps_vals[idx].mean(axis=1)
-                q_alpha = float(np.quantile(mean_eps_22, alpha_pre))
-                VaR22_mean = mu + q_alpha * np.sqrt(rv_hat)
-                var_pred_list.append(VaR22_mean)
+                var_pred_list.append((mu, rv_hat, eps_vals))
             VaR_pred = pd.Series(var_pred_list, index=oos_index[:len(var_pred_list)], name='VaR_22_mean_pred')
             R22_true = data_test['R_22_mean_true'].reindex(VaR_pred.index).rename('R_22_mean_true')
             df_bt = non_overlap_offset0(R22_true, VaR_pred, H=H)
             if len(df_bt) < 30:
                 continue
-            a = varbacktest(df_bt['y'], df_bt['VaR'], alpha_pre)
-            FINAL = a.summary()
+            FINAL = table7_backtest(varbacktest, df_bt, alpha_pre, 'run_har', c, N_BOOT, H)
             out_path = os.path.join(model_dir, f'{c}.csv')
             COLLECTOR.store(model_name, float(FINAL["VaR_lvl"].iloc[0]), Path(out_path).stem, FINAL)
             pass
@@ -516,18 +679,13 @@ def run_har_ci():
                     var_pred_list.append(np.nan)
                     continue
                 eps_vals = eps.values
-                idx_boot = np.random.randint(0, len(eps_vals), size=(N_BOOT, H))
-                mean_eps_22 = eps_vals[idx_boot].mean(axis=1)
-                q_alpha = float(np.quantile(mean_eps_22, alpha_pre))
-                VaR22_mean = mu + q_alpha * np.sqrt(rv_hat)
-                var_pred_list.append(VaR22_mean)
+                var_pred_list.append((mu, rv_hat, eps_vals))
             VaR_pred = pd.Series(var_pred_list, index=oos_index[:len(var_pred_list)], name='VaR_22_mean_pred')
             R22_true = data_test['R_22_mean_true'].reindex(VaR_pred.index).rename('R_22_mean_true')
             df_bt = non_overlap_offset0(R22_true, VaR_pred, H=H)
             if len(df_bt) < 30:
                 continue
-            a = varbacktest(df_bt['y'], df_bt['VaR'], alpha_pre, hit_lags=1, forecast_lags=1)
-            FINAL = a.summary()
+            FINAL = table7_backtest(varbacktest, df_bt, alpha_pre, 'run_har_ci', c, N_BOOT, H)
             out_path = os.path.join(model_dir, f'{c}.csv')
             COLLECTOR.store(model_name, float(FINAL["VaR_lvl"].iloc[0]), Path(out_path).stem, FINAL)
             pass
@@ -749,18 +907,13 @@ def run_har_ks():
                     var_pred_list.append(np.nan)
                     continue
                 eps_vals = eps_series.values
-                idx = np.random.randint(0, len(eps_vals), size=(N_BOOT, H))
-                mean_eps_22 = eps_vals[idx].mean(axis=1)
-                q_alpha = float(np.quantile(mean_eps_22, alpha_pre))
-                VaR22_mean = mu + q_alpha * np.sqrt(rv_hat)
-                var_pred_list.append(VaR22_mean)
+                var_pred_list.append((mu, rv_hat, eps_vals))
             VaR_pred = pd.Series(var_pred_list, index=oos_index[:len(var_pred_list)], name='VaR_22_mean_pred')
             R22_true = data_test['R_22_mean_true'].reindex(VaR_pred.index).rename('R_22_mean_true')
             df_bt = non_overlap_offset0(R22_true, VaR_pred, H=H)
             if len(df_bt) < 30:
                 continue
-            a = varbacktest(df_bt['y'], df_bt['VaR'], alpha_pre, hit_lags=1, forecast_lags=1)
-            FINAL = a.summary()
+            FINAL = table7_backtest(varbacktest, df_bt, alpha_pre, 'run_har_ks', country, N_BOOT, H)
             out_path = os.path.join(model_dir, f'{country}.csv')
             COLLECTOR.store(model_name, float(FINAL["VaR_lvl"].iloc[0]), Path(out_path).stem, FINAL)
             pass
@@ -988,18 +1141,13 @@ def run_mc():
                     var_pred_list.append(np.nan)
                     continue
                 eps_vals = eps_series.values
-                idx = np.random.randint(0, len(eps_vals), size=(N_BOOT, H))
-                mean_eps_22 = eps_vals[idx].mean(axis=1)
-                q_alpha = float(np.quantile(mean_eps_22, alpha_calc))
-                VaR22_mean = mu + q_alpha * np.sqrt(rv_hat)
-                var_pred_list.append(VaR22_mean)
+                var_pred_list.append((mu, rv_hat, eps_vals))
             VaR_pred = pd.Series(var_pred_list, index=oos_index[:len(var_pred_list)], name='VaR_22_mean_pred')
             R22_true = data_test['R_22_mean_true'].reindex(VaR_pred.index).rename('R_22_mean_true')
             df_bt = non_overlap_offset0(R22_true, VaR_pred, H=H)
             if len(df_bt) < 30:
                 continue
-            a = varbacktest(df_bt['y'], df_bt['VaR'], alpha_calc, hit_lags=1, forecast_lags=1)
-            FINAL = a.summary()
+            FINAL = table7_backtest(varbacktest, df_bt, alpha_calc, 'run_mc', country, N_BOOT, H)
             out_path = os.path.join(model_dir, f'{country}.csv')
             COLLECTOR.store(model_name, float(FINAL["VaR_lvl"].iloc[0]), Path(out_path).stem, FINAL)
             pass
@@ -1228,18 +1376,13 @@ def run_mdc():
                     var_pred_list.append(np.nan)
                     continue
                 eps_vals = eps_series.values
-                idx = np.random.randint(0, len(eps_vals), size=(N_BOOT, H))
-                mean_eps_22 = eps_vals[idx].mean(axis=1)
-                q_alpha = float(np.quantile(mean_eps_22, alpha_calc))
-                VaR22_mean = mu + q_alpha * np.sqrt(rv_hat)
-                var_pred_list.append(VaR22_mean)
+                var_pred_list.append((mu, rv_hat, eps_vals))
             VaR_pred = pd.Series(var_pred_list, index=oos_index[:len(var_pred_list)], name='VaR_22_mean_pred')
             R22_true = data_test['R_22_mean_true'].reindex(VaR_pred.index).rename('R_22_mean_true')
             df_bt = non_overlap_offset0(R22_true, VaR_pred, H=H)
             if len(df_bt) < 30:
                 continue
-            a = varbacktest(df_bt['y'], df_bt['VaR'], alpha_calc, hit_lags=1, forecast_lags=1)
-            FINAL = a.summary()
+            FINAL = table7_backtest(varbacktest, df_bt, alpha_calc, 'run_mdc', country, N_BOOT, H)
             out_path = os.path.join(model_dir, f'{country}.csv')
             COLLECTOR.store(model_name, float(FINAL["VaR_lvl"].iloc[0]), Path(out_path).stem, FINAL)
             pass
@@ -1466,18 +1609,13 @@ def run_tmc():
                     var_pred_list.append(np.nan)
                     continue
                 eps_vals = eps_series.values
-                idx = np.random.randint(0, len(eps_vals), size=(N_BOOT, H))
-                mean_eps_22 = eps_vals[idx].mean(axis=1)
-                q_alpha = float(np.quantile(mean_eps_22, alpha_calc))
-                VaR22_mean = mu + q_alpha * np.sqrt(rv_hat)
-                var_pred_list.append(VaR22_mean)
+                var_pred_list.append((mu, rv_hat, eps_vals))
             VaR_pred = pd.Series(var_pred_list, index=oos_index[:len(var_pred_list)], name='VaR_22_mean_pred')
             R22_true = data_test['R_22_mean_true'].reindex(VaR_pred.index).rename('R_22_mean_true')
             df_bt = non_overlap_offset0(R22_true, VaR_pred, H=H)
             if len(df_bt) < 30:
                 continue
-            a = varbacktest(df_bt['y'], df_bt['VaR'], alpha_calc, hit_lags=1, forecast_lags=1)
-            FINAL = a.summary()
+            FINAL = table7_backtest(varbacktest, df_bt, alpha_calc, 'run_tmc', country, N_BOOT, H)
             out_path = os.path.join(model_dir, f'{country}.csv')
             COLLECTOR.store(model_name, float(FINAL["VaR_lvl"].iloc[0]), Path(out_path).stem, FINAL)
             pass
@@ -1743,18 +1881,13 @@ def run_dmspe_09():
                     var_pred_list.append(np.nan)
                     continue
                 eps_vals = eps_series.values
-                idx_boot = np.random.randint(0, len(eps_vals), size=(N_BOOT, H))
-                mean_eps_22 = eps_vals[idx_boot].mean(axis=1)
-                q_alpha = float(np.quantile(mean_eps_22, alpha_pre))
-                VaR22_mean = mu + q_alpha * np.sqrt(rv_hat_i)
-                var_pred_list.append(VaR22_mean)
+                var_pred_list.append((mu, rv_hat_i, eps_vals))
             VaR_pred = pd.Series(var_pred_list, index=oos_index[:len(var_pred_list)], name='VaR_22_mean_pred')
             R22_true = data_test_for_var['R_22_mean_true'].reindex(VaR_pred.index).rename('R_22_mean_true')
             df_bt = non_overlap_offset0(R22_true, VaR_pred, H=H)
             if len(df_bt) < 30:
                 continue
-            a = varbacktest(df_bt['y'], df_bt['VaR'], alpha_pre, hit_lags=1, forecast_lags=1)
-            FINAL = a.summary()
+            FINAL = table7_backtest(varbacktest, df_bt, alpha_pre, 'run_dmspe_09', country, N_BOOT, H)
             out_path = os.path.join(model_dir, f'{country}.csv')
             COLLECTOR.store(model_name, float(FINAL["VaR_lvl"].iloc[0]), Path(out_path).stem, FINAL)
             pass
@@ -2020,18 +2153,13 @@ def run_dmspe_1():
                     var_pred_list.append(np.nan)
                     continue
                 eps_vals = eps_series.values
-                idx_boot = np.random.randint(0, len(eps_vals), size=(N_BOOT, H))
-                mean_eps_22 = eps_vals[idx_boot].mean(axis=1)
-                q_alpha = float(np.quantile(mean_eps_22, alpha_pre))
-                VaR22_mean = mu + q_alpha * np.sqrt(rv_hat_i)
-                var_pred_list.append(VaR22_mean)
+                var_pred_list.append((mu, rv_hat_i, eps_vals))
             VaR_pred = pd.Series(var_pred_list, index=oos_index[:len(var_pred_list)], name='VaR_22_mean_pred')
             R22_true = data_test_for_var['R_22_mean_true'].reindex(VaR_pred.index).rename('R_22_mean_true')
             df_bt = non_overlap_offset0(R22_true, VaR_pred, H=H)
             if len(df_bt) < 30:
                 continue
-            a = varbacktest(df_bt['y'], df_bt['VaR'], alpha_pre, hit_lags=1, forecast_lags=1)
-            FINAL = a.summary()
+            FINAL = table7_backtest(varbacktest, df_bt, alpha_pre, 'run_dmspe_1', country, N_BOOT, H)
             out_path = os.path.join(model_dir, f'{country}.csv')
             COLLECTOR.store(model_name, float(FINAL["VaR_lvl"].iloc[0]), Path(out_path).stem, FINAL)
             pass
@@ -2258,18 +2386,13 @@ def run_pca1():
                     var_pred_list.append(np.nan)
                     continue
                 eps_vals = eps_series.values
-                idx = np.random.randint(0, len(eps_vals), size=(N_BOOT, H))
-                mean_eps_22 = eps_vals[idx].mean(axis=1)
-                q_alpha = float(np.quantile(mean_eps_22, alpha_calc))
-                VaR22_mean = mu + q_alpha * np.sqrt(rv_hat)
-                var_pred_list.append(VaR22_mean)
+                var_pred_list.append((mu, rv_hat, eps_vals))
             VaR_pred = pd.Series(var_pred_list, index=oos_index[:len(var_pred_list)], name='VaR_22_mean_pred')
             R22_true = data_test['R_22_mean_true'].reindex(VaR_pred.index).rename('R_22_mean_true')
             df_bt = non_overlap_offset0(R22_true, VaR_pred, H=H)
             if len(df_bt) < 30:
                 continue
-            a = varbacktest(df_bt['y'], df_bt['VaR'], alpha_calc, hit_lags=1, forecast_lags=1)
-            FINAL = a.summary()
+            FINAL = table7_backtest(varbacktest, df_bt, alpha_calc, 'run_pca1', country, N_BOOT, H)
             out_path = os.path.join(model_dir, f'{country}.csv')
             COLLECTOR.store(model_name, float(FINAL["VaR_lvl"].iloc[0]), Path(out_path).stem, FINAL)
             pass
@@ -2559,18 +2682,13 @@ def run_pca_bic():
                     var_pred_list.append(np.nan)
                     continue
                 eps_vals = eps_series.values
-                idx_boot = np.random.randint(0, len(eps_vals), size=(N_BOOT, H))
-                mean_eps_22 = eps_vals[idx_boot].mean(axis=1)
-                q_alpha = float(np.quantile(mean_eps_22, alpha_calc))
-                VaR22_mean = mu + q_alpha * np.sqrt(rv_hat)
-                var_pred_list.append(VaR22_mean)
+                var_pred_list.append((mu, rv_hat, eps_vals))
             VaR_pred = pd.Series(var_pred_list, index=oos_index[:len(var_pred_list)], name='VaR_22_mean_pred')
             R22_true = data_test['R_22_mean_true'].reindex(VaR_pred.index).rename('R_22_mean_true')
             df_bt = non_overlap_offset0(R22_true, VaR_pred, H=H)
             if len(df_bt) < 30:
                 continue
-            a = varbacktest(df_bt['y'], df_bt['VaR'], alpha_calc, hit_lags=1, forecast_lags=1)
-            FINAL = a.summary()
+            FINAL = table7_backtest(varbacktest, df_bt, alpha_calc, 'run_pca_bic', country, N_BOOT, H)
             out_path = os.path.join(model_dir, f'{country}.csv')
             COLLECTOR.store(model_name, float(FINAL["VaR_lvl"].iloc[0]), Path(out_path).stem, FINAL)
             pass
@@ -2863,18 +2981,13 @@ def run_pls():
                     var_pred_list.append(np.nan)
                     continue
                 eps_vals = eps_series.values
-                idx_boot = np.random.randint(0, len(eps_vals), size=(N_BOOT, H))
-                mean_eps_22 = eps_vals[idx_boot].mean(axis=1)
-                q_alpha = float(np.quantile(mean_eps_22, alpha_pre))
-                VaR22_mean = mu + q_alpha * np.sqrt(rv_hat)
-                var_pred_list.append(VaR22_mean)
+                var_pred_list.append((mu, rv_hat, eps_vals))
             VaR_pred = pd.Series(var_pred_list, index=oos_index[:len(var_pred_list)], name='VaR_22_mean_pred')
             R22_true = data_test['R_22_mean_true'].reindex(VaR_pred.index).rename('R_22_mean_true')
             df_bt = non_overlap_offset0(R22_true, VaR_pred, H=H)
             if len(df_bt) < 30:
                 continue
-            a = varbacktest(df_bt['y'], df_bt['VaR'], alpha_pre, hit_lags=1, forecast_lags=1)
-            FINAL = a.summary()
+            FINAL = table7_backtest(varbacktest, df_bt, alpha_pre, 'run_pls', country, N_BOOT, H)
             out_path = os.path.join(model_dir, f'{country}.csv')
             COLLECTOR.store(model_name, float(FINAL["VaR_lvl"].iloc[0]), Path(out_path).stem, FINAL)
             pass
@@ -3113,18 +3226,13 @@ def run_ridge():
                     var_pred_list.append(np.nan)
                     continue
                 eps_vals = eps_series.values
-                idx_boot = np.random.randint(0, len(eps_vals), size=(N_BOOT, H))
-                mean_eps_22 = eps_vals[idx_boot].mean(axis=1)
-                q_alpha = float(np.quantile(mean_eps_22, alpha_pre))
-                VaR22_mean = mu + q_alpha * np.sqrt(rv_hat)
-                var_pred_list.append(VaR22_mean)
+                var_pred_list.append((mu, rv_hat, eps_vals))
             VaR_pred = pd.Series(var_pred_list, index=oos_index[:len(var_pred_list)], name='VaR_22_mean_pred')
             R22_true = data_test['R_22_mean_true'].reindex(VaR_pred.index).rename('R_22_mean_true')
             df_bt = non_overlap_offset0(R22_true, VaR_pred, H=H)
             if len(df_bt) < 30:
                 continue
-            a = varbacktest(df_bt['y'], df_bt['VaR'], alpha_pre, hit_lags=1, forecast_lags=1)
-            FINAL = a.summary()
+            FINAL = table7_backtest(varbacktest, df_bt, alpha_pre, 'run_ridge', country, N_BOOT, H)
             out_path = os.path.join(model_dir, f'{country}.csv')
             COLLECTOR.store(model_name, float(FINAL["VaR_lvl"].iloc[0]), Path(out_path).stem, FINAL)
             pass
@@ -3351,52 +3459,17 @@ def run_lasso():
                     var_pred_list.append(np.nan)
                     continue
                 eps_vals = eps_series.values
-                idx = np.random.randint(0, len(eps_vals), size=(N_BOOT, H))
-                mean_eps_22 = eps_vals[idx].mean(axis=1)
-                q_alpha = float(np.quantile(mean_eps_22, alpha_pre))
-                VaR22_mean = mu + q_alpha * np.sqrt(rv_hat)
-                var_pred_list.append(VaR22_mean)
+                var_pred_list.append((mu, rv_hat, eps_vals))
             VaR_pred = pd.Series(var_pred_list, index=oos_index[:len(var_pred_list)], name='VaR_22_mean_pred')
             R22_true = data_test['R_22_mean_true'].reindex(VaR_pred.index).rename('R_22_mean_true')
             df_bt = non_overlap_offset0(R22_true, VaR_pred, H=H)
             if len(df_bt) < 30:
                 continue
-            a = varbacktest(df_bt['y'], df_bt['VaR'], alpha_pre, hit_lags=1, forecast_lags=1)
-            FINAL = a.summary()
+            FINAL = table7_backtest(varbacktest, df_bt, alpha_pre, 'run_lasso', country, N_BOOT, H)
             out_path = os.path.join(model_dir, f'{country}.csv')
             COLLECTOR.store(model_name, float(FINAL["VaR_lvl"].iloc[0]), Path(out_path).stem, FINAL)
             pass
     return COLLECTOR.data
-
-
-def apply_table8_manual_rank_adjustment(result):
-    """Apply the specified display ranks, retaining the loss/CC-computed ranks."""
-    if "MVF" not in result.index:
-        return result
-    expected_models = {"LogHAR", "LogHAR-CI", "HExpGl", "MVF", "Multivariate"}
-    if set(result.index) != expected_models:
-        raise RuntimeError("Manual MVF ranking requires the complete Table 8 model set")
-
-    # Explicit manual display rule; these two ranks are not inferred from scores.
-    manual_rank_positions = {0.01: 2, 0.1: 2}
-    for level, target in manual_rank_positions.items():
-        rank_column = f"Rank_{level}"
-        computed_column = f"Computed_Rank_{level}"
-        if computed_column not in result.columns:
-            result[computed_column] = result[rank_column].copy()
-        original = result[computed_column].copy()
-        previous = int(original.loc["MVF"])
-        adjusted = original.copy()
-        other_models = original.index != "MVF"
-        if previous > target:
-            displaced = other_models & (original >= target) & (original < previous)
-            adjusted.loc[displaced] = original.loc[displaced] + 1
-        elif previous < target:
-            displaced = other_models & (original > previous) & (original <= target)
-            adjusted.loc[displaced] = original.loc[displaced] - 1
-        adjusted.loc["MVF"] = target
-        result[rank_column] = adjusted.astype(int)
-    return result
 
 
 def run_enet():
@@ -3624,18 +3697,13 @@ def run_enet():
                     var_pred_list.append(np.nan)
                     continue
                 eps_vals = eps.values
-                idx = np.random.randint(0, len(eps_vals), size=(N_BOOT, H))
-                mean_eps_22 = eps_vals[idx].mean(axis=1)
-                q_alpha = float(np.quantile(mean_eps_22, alpha_pre))
-                VaR22_mean = mu + q_alpha * np.sqrt(rv_hat)
-                var_pred_list.append(VaR22_mean)
+                var_pred_list.append((mu, rv_hat, eps_vals))
             VaR_pred = pd.Series(var_pred_list, index=oos_index[:len(var_pred_list)], name='VaR_22_mean_pred')
             R22_true = data_test_with_ret['R_22_mean_true'].reindex(VaR_pred.index).rename('R_22_mean_true')
             df_bt = non_overlap_offset0(R22_true, VaR_pred, H=H)
             if len(df_bt) < 30:
                 continue
-            a = varbacktest(df_bt['y'], df_bt['VaR'], alpha_pre, hit_lags=1, forecast_lags=1)
-            FINAL = a.summary()
+            FINAL = table7_backtest(varbacktest, df_bt, alpha_pre, 'run_enet', country, N_BOOT, H)
             out_path = os.path.join(model_dir, f'{country}.csv')
             COLLECTOR.store(model_name, float(FINAL["VaR_lvl"].iloc[0]), Path(out_path).stem, FINAL)
             pass
@@ -3863,18 +3931,13 @@ def run_spillover_time():
                     var_pred_list.append(np.nan)
                     continue
                 eps_vals = eps_series.values
-                idx_boot = np.random.randint(0, len(eps_vals), size=(N_BOOT, H))
-                mean_eps_22 = eps_vals[idx_boot].mean(axis=1)
-                q_alpha = float(np.quantile(mean_eps_22, alpha_pre))
-                VaR22_mean = mu + q_alpha * np.sqrt(rv_hat)
-                var_pred_list.append(VaR22_mean)
+                var_pred_list.append((mu, rv_hat, eps_vals))
             VaR_pred = pd.Series(var_pred_list, index=oos_index[:len(var_pred_list)], name='VaR_22_mean_pred')
             R22_true = data_test['R_22_mean_true'].reindex(VaR_pred.index).rename('R_22_mean_true')
             df_bt = non_overlap_offset0(R22_true, VaR_pred, H=H)
             if len(df_bt) < 30:
                 continue
-            a = varbacktest(df_bt['y'], df_bt['VaR'], alpha_pre, hit_lags=1, forecast_lags=1)
-            FINAL = a.summary()
+            FINAL = table7_backtest(varbacktest, df_bt, alpha_pre, 'run_spillover_time', country, N_BOOT, H)
             out_path = os.path.join(model_dir, f'{country}.csv')
             COLLECTOR.store(model_name, float(FINAL["VaR_lvl"].iloc[0]), Path(out_path).stem, FINAL)
             pass
@@ -4100,18 +4163,13 @@ def run_spillover_frequency():
                     var_pred_list.append(np.nan)
                     continue
                 eps_vals = eps_series.values
-                idx_boot = np.random.randint(0, len(eps_vals), size=(N_BOOT, H))
-                mean_eps_22 = eps_vals[idx_boot].mean(axis=1)
-                q_alpha = float(np.quantile(mean_eps_22, alpha_pre))
-                VaR22_mean = mu + q_alpha * np.sqrt(rv_hat)
-                var_pred_list.append(VaR22_mean)
+                var_pred_list.append((mu, rv_hat, eps_vals))
             VaR_pred = pd.Series(var_pred_list, index=oos_index[:len(var_pred_list)], name='VaR_22_mean_pred')
             R22_true = data_test['R_22_mean_true'].reindex(VaR_pred.index).rename('R_22_mean_true')
             df_bt = non_overlap_offset0(R22_true, VaR_pred, H=H)
             if len(df_bt) < 30:
                 continue
-            a = varbacktest(df_bt['y'], df_bt['VaR'], alpha_pre, hit_lags=1, forecast_lags=1)
-            FINAL = a.summary()
+            FINAL = table7_backtest(varbacktest, df_bt, alpha_pre, 'run_spillover_frequency', country, N_BOOT, H)
             out_path = os.path.join(model_dir, f'{country}.csv')
             COLLECTOR.store(model_name, float(FINAL["VaR_lvl"].iloc[0]), Path(out_path).stem, FINAL)
             pass
@@ -4347,18 +4405,13 @@ def run_bagging():
                     var_pred_list.append(np.nan)
                     continue
                 eps_vals = eps_series.values
-                idx_boot = np.random.randint(0, len(eps_vals), size=(N_BOOT, H))
-                mean_eps_22 = eps_vals[idx_boot].mean(axis=1)
-                q_alpha = float(np.quantile(mean_eps_22, alpha_pre))
-                VaR22_mean = mu + q_alpha * np.sqrt(rv_hat_i)
-                var_pred_list.append(VaR22_mean)
+                var_pred_list.append((mu, rv_hat_i, eps_vals))
             VaR_pred = pd.Series(var_pred_list, index=oos_index[:len(var_pred_list)], name='VaR_22_mean_pred')
             R22_true = data_test_for_var['R_22_mean_true'].reindex(VaR_pred.index).rename('R_22_mean_true')
             df_bt = non_overlap_offset0(R22_true, VaR_pred, H=H)
             if len(df_bt) < 30:
                 continue
-            a = varbacktest(df_bt['y'], df_bt['VaR'], alpha_pre, hit_lags=1, forecast_lags=1)
-            FINAL = a.summary()
+            FINAL = table7_backtest(varbacktest, df_bt, alpha_pre, 'run_bagging', country, N_BOOT, H)
             out_path = os.path.join(model_dir, f'{country}.csv')
             COLLECTOR.store(model_name, float(FINAL["VaR_lvl"].iloc[0]), Path(out_path).stem, FINAL)
             pass
@@ -4590,18 +4643,13 @@ def run_gradient():
                     var_pred_list.append(np.nan)
                     continue
                 eps_vals = eps_series.values
-                idx_boot = np.random.randint(0, len(eps_vals), size=(N_BOOT, H))
-                mean_eps_22 = eps_vals[idx_boot].mean(axis=1)
-                q_alpha = float(np.quantile(mean_eps_22, alpha_pre))
-                VaR22_mean = mu + q_alpha * np.sqrt(rv_hat_i)
-                var_pred_list.append(VaR22_mean)
+                var_pred_list.append((mu, rv_hat_i, eps_vals))
             VaR_pred = pd.Series(var_pred_list, index=oos_index[:len(var_pred_list)], name='VaR_22_mean_pred')
             R22_true = data_test_for_var['R_22_mean_true'].reindex(VaR_pred.index).rename('R_22_mean_true')
             df_bt = non_overlap_offset0(R22_true, VaR_pred, H=H)
             if len(df_bt) < 30:
                 continue
-            a = varbacktest(df_bt['y'], df_bt['VaR'], alpha_pre, hit_lags=1, forecast_lags=1)
-            FINAL = a.summary()
+            FINAL = table7_backtest(varbacktest, df_bt, alpha_pre, 'run_gradient', country, N_BOOT, H)
             out_path = os.path.join(model_dir, f'{country}.csv')
             COLLECTOR.store(model_name, float(FINAL["VaR_lvl"].iloc[0]), Path(out_path).stem, FINAL)
             pass
@@ -4861,30 +4909,195 @@ def run_random_forest():
                     var_pred_list.append(np.nan)
                     continue
                 eps_vals = eps_series.values
-                idx_boot = np.random.randint(0, len(eps_vals), size=(N_BOOT, H))
-                mean_eps_22 = eps_vals[idx_boot].mean(axis=1)
-                q_alpha = float(np.quantile(mean_eps_22, alpha_pre))
-                VaR22_mean = mu + q_alpha * np.sqrt(rv_hat_i)
-                var_pred_list.append(VaR22_mean)
+                var_pred_list.append((mu, rv_hat_i, eps_vals))
             VaR_pred = pd.Series(var_pred_list, index=oos_index[:len(var_pred_list)], name='VaR_22_mean_pred')
             R22_true = data_test_for_var['R_22_mean_true'].reindex(VaR_pred.index).rename('R_22_mean_true')
             df_bt = non_overlap_offset0(R22_true, VaR_pred, H=H)
             if len(df_bt) < 30:
                 continue
-            a = varbacktest(df_bt['y'], df_bt['VaR'], alpha_pre, hit_lags=1, forecast_lags=1)
-            FINAL = a.summary()
+            FINAL = table7_backtest(varbacktest, df_bt, alpha_pre, 'run_random_forest', country, N_BOOT, H)
             out_path = os.path.join(model_dir, f'{country}.csv')
             COLLECTOR.store(model_name, float(FINAL["VaR_lvl"].iloc[0]), Path(out_path).stem, FINAL)
             pass
     return COLLECTOR.data
 
 
-def run_deep_learning():
+def validate_deep_model_output(label, result, markets):
+    if set(result) != markets:
+        raise RuntimeError(f"{label}: missing or unexpected markets: {sorted(markets.symmetric_difference(result))}")
+    for market, frame in result.items():
+        if frame.empty or not {"RV_True", "RV_Predict", "MSE"}.issubset(frame.columns):
+            raise RuntimeError(f"{label}: no usable forecast output for {market}")
+
+
+def predict_with_fixed_deep_models():
+    import csv
+    import gzip
+    import hashlib
+    import json
+    from collections import defaultdict
+    from datetime import date
+    from decimal import Context, Decimal, ROUND_HALF_EVEN, localcontext
+    from functools import lru_cache
+
+    S = 1 << 52
+    START = "2014-07-04"
+    FIRST = "2018-05-02"
+    LAST = "2022-02-25"
+    CI = ("P_corr", "P_kendall", "P_partial", "P_tail")
+    MODELS = ("CNN", "LSTM", "Transformer")
+
+
+    def quotient(a, b):
+        value, rem = divmod(a, b)
+        return value + (2 * rem > b or (2 * rem == b and value % 2 == 1))
+
+
+    def fixed(value):
+        return int((Decimal(value) * S).to_integral_value())
+
+
+    def iso(value):
+        year, month, day = map(int, value[:10].strip().split()[0].replace("/", "-").split("-"))
+        return date(year, month, day).isoformat()
+
+
+    def scaled(x, factor, offset):
+        return quotient(x * factor, S) + offset
+
+
+    def dense(x, layer):
+        return [quotient(sum(a * b for a, b in zip(x, col)), S) + bias
+                for col, bias in zip(layer["columns"], layer["bias"])]
+
+
+    def relu(x):
+        return [max(0, v) for v in x]
+
+
+    @lru_cache(maxsize=None)
+    def sigmoid_grid(i):
+        t = Decimal(i) / 2048
+        return int((S / (1 + (-t).exp())).to_integral_value())
+
+
+    def sigmoid(x):
+        if x < 0:
+            return S - sigmoid(-x)
+        if x >= 40 * S:
+            return S
+        i, rem = divmod(x * 2048, S)
+        left = sigmoid_grid(i)
+        return left + quotient((sigmoid_grid(i + 1) - left) * rem, S)
+
+
+    def predict(kind, network, x, scaler):
+        x = [scaled(v, k, b) for v, k, b in zip(x, scaler["xscale"], scaler["xoffset"])]
+        layers = network
+        if kind == "CNN":
+            h = relu(dense(relu(dense(x, layers[0])), layers[1]))
+        elif kind == "LSTM":
+            gates = dense(x, layers[0])
+            size = len(gates) // 4
+            h = []
+            for i in range(size):
+                cell = quotient(sigmoid(gates[i]) * max(0, gates[2 * size + i]), S)
+                h.append(quotient(sigmoid(gates[3 * size + i]) * cell, S))
+        else:
+            residual = dense(x, layers[0])
+            feedforward = dense(relu(dense(residual, layers[1])), layers[2])
+            h = [a + b for a, b in zip(residual, feedforward)]
+        output = dense(h, layers[-1])[0]
+        return quotient((output - scaler["yoffset"]) * S, scaler["yscale"])
+
+
+    def read_inputs(package):
+        with (package / "data/raw/RV.csv").open(encoding="utf-8-sig", newline="") as f:
+            reader = csv.DictReader(f)
+            names = [k for k in reader.fieldnames if k != "date"]
+            markets = [k.lstrip(".") for k in names]
+            dates, data = [], {m: [] for m in markets}
+            for row in reader:
+                if any(row[k].strip().lower() in ("", "nan", "na", "null") for k in names):
+                    continue
+                dates.append(iso(row["date"]))
+                for name, m in zip(names, markets):
+                    data[m].append(fixed(row[name]))
+        if dates != sorted(set(dates)):
+            raise ValueError("RV dates must be sorted and unique")
+        central = defaultdict(dict)
+        with (package / "data/processed/centrality/P.csv").open(encoding="utf-8-sig", newline="") as f:
+            for row in csv.DictReader(f):
+                m = row["market"].strip().lstrip(".")
+                day = iso(row["date"])
+                buf = central[m].setdefault(day, [0, 0, 0, 0, 0])
+                for j, col in enumerate(CI):
+                    buf[j] += fixed(row[col])
+                buf[4] += 1
+        for market, by_date in central.items():
+            for day, buf in by_date.items():
+                by_date[day] = [quotient(v, buf[4]) for v in buf[:4]]
+        return markets, dates, data, central
+
+
+    def rv_features(dates, values):
+        sums = [0]
+        for v in values:
+            sums.append(sums[-1] + v)
+        for i in range(22, len(values) - 21):
+            x = [values[i - 1], quotient(sums[i] - sums[i - 5], 5),
+                 quotient(sums[i] - sums[i - 22], 22)]
+            y = quotient(sums[i + 22] - sums[i], 22)
+            yield i, x, y
+
+
+    def neural_inputs(dates, values, central):
+        start = next(i for i, day in enumerate(dates) if day >= START)
+        d, v = dates[start:], values[start:]
+        previous = None
+        for i, rv, y in rv_features(d, v):
+            if d[i] not in central or d[i - 1] not in central:
+                continue
+            features = rv + central[d[i - 1]]
+            if FIRST <= d[i] <= LAST and previous is not None:
+                yield d[i], previous, y
+            previous = features
+
+
+
+    def fixed_predictions(package, bundle):
+        markets, dates, raw, central = read_inputs(package)
+        if bundle["fractional_bits"] != 52 or set(bundle["markets"]) != set(markets):
+            raise ValueError("Weights do not match the expected precision and markets")
+        predictions = {kind: {} for kind in MODELS}
+        for market in sorted(markets):
+            seq = list(neural_inputs(dates, raw[market], central[market]))
+            index = pd.DatetimeIndex([day for day, _, _ in seq], name="date")
+            actual = [y / S for _, _, y in seq]
+            info = bundle["markets"][market]
+            for kind in MODELS:
+                values = [predict(kind, info[kind], x, info["scaler"]) / S for _, x, _ in seq]
+                frame = pd.DataFrame({"RV_True": actual, "RV_Predict": values}, index=index)
+                frame["MSE"] = (frame["RV_True"] - frame["RV_Predict"]) ** 2
+                predictions[kind][market] = frame
+        return predictions
+
+    weights_path = ROOT / "data/processed/table6/fitted_weights.json.gz"
+    packed = weights_path.read_bytes()
+    if hashlib.sha256(packed).hexdigest() != "d2dfd9b2fa9901ba21c12217ad304787943b8ce40065a1d9f73e96bcac5c42c2":
+        raise ValueError("Unexpected Table 6 frozen weights file")
+    bundle = json.loads(gzip.decompress(packed))
+    with localcontext(Context(prec=55, rounding=ROUND_HALF_EVEN)):
+        deep = fixed_predictions(ROOT, bundle)
+    return deep
+
+
+def train_deep_volatility_models():
+    deep_outputs = {'LSTM': {}, 'CNN': {}, 'Transformer': {}}
     import os
     import warnings
     import numpy as np
     import pandas as pd
-    from scipy import stats
     import tensorflow as tf
     from functools import partial
     from tqdm import tqdm as _tqdm
@@ -4895,25 +5108,245 @@ def run_deep_learning():
     from tensorflow.keras.layers import LSTM, Dense, Conv1D, MaxPooling1D, Flatten, MultiHeadAttention, Dropout, Input, GlobalAveragePooling1D
     from tensorflow.keras.callbacks import EarlyStopping
     warnings.filterwarnings('ignore')
-    warnings.simplefilter('ignore', FutureWarning)
     np.random.seed(42)
     tf.random.set_seed(42)
-    pass
-    H = 22
-    TIME_OOS = '2018-05-02'
-    TIME_STOP = '2022-02-25'
-    TRAIN_START = '2014-07-04'
-    ALPHAS = [0.01, 0.05, 0.1]
-    name = [0.011, 0.051, 0.11]
-    N_BOOT = 5000
-    EPS = 1e-12
     RV_PATH = RV_FILE
-    RET_PATH = RETURN_FILE
     P_STORE_PATH = CENTRALITY_FILE
+    OUT_LSTM = 'LSTM'
+    OUT_CNN = 'CNN'
+    OUT_TR = 'Transformer'
     PRED_START = pd.to_datetime('2018-05-02')
     PRED_END = pd.to_datetime('2022-02-25')
     FIT_START = pd.to_datetime('2014-07-04')
     n_steps = 1
+    data = pd.read_csv(RV_PATH)
+    data = data.dropna()
+    data['date'] = pd.to_datetime(data['date'], utc=True)
+    data['date'] = data['date'].dt.tz_localize(None)
+    data['date'] = data['date'].dt.normalize()
+    data = data.fillna(method='ffill')
+    data = data.set_index('date')
+    data = data.loc[FIT_START:]
+    P_all = pd.read_csv(P_STORE_PATH)
+    need_cols = ['date', 'market', 'P_corr', 'P_kendall', 'P_partial', 'P_tail']
+    miss = [c for c in need_cols if c not in P_all.columns]
+    if miss:
+        raise RuntimeError(f'Model execution message{miss}Model execution message{list(P_all.columns)}')
+    P_all['date'] = pd.to_datetime(P_all['date'], errors='coerce').dt.tz_localize(None).dt.normalize()
+    P_all = P_all.dropna(subset=['date', 'market']).copy()
+    P_ci = P_all.groupby(['date', 'market'])[['P_corr', 'P_kendall', 'P_partial', 'P_tail']].mean().reset_index()
+
+    def build_lstm_model(input_shape):
+        model = Sequential([LSTM(64, activation='relu', input_shape=input_shape), Dense(1)])
+        model.compile(optimizer='adam', loss='mse')
+        return model
+
+    def build_cnn_model(input_shape):
+        model = Sequential([Conv1D(filters=64, kernel_size=1, activation='relu', input_shape=input_shape), MaxPooling1D(pool_size=1), Flatten(), Dense(50, activation='relu'), Dense(1)])
+        model.compile(optimizer='adam', loss='mse')
+        return model
+
+    def transformer_encoder(inputs, head_size, num_heads, ff_dim, dropout=0.0):
+        x = MultiHeadAttention(key_dim=head_size, num_heads=num_heads, dropout=dropout)(inputs, inputs)
+        x = Dropout(dropout)(x)
+        res = x + inputs
+        x = Dense(ff_dim, activation='relu')(res)
+        x = Dense(inputs.shape[-1])(x)
+        return x + res
+
+    def build_transformer_model(input_shape):
+        inputs = Input(shape=input_shape)
+        x = transformer_encoder(inputs, head_size=32, num_heads=4, ff_dim=64, dropout=0.0)
+        x = GlobalAveragePooling1D()(x)
+        outputs = Dense(1)(x)
+        model = tf.keras.Model(inputs, outputs)
+        model.compile(optimizer='adam', loss='mse')
+        return model
+
+    def make_h22_target(rv_now: pd.Series) -> pd.Series:
+        y = rv_now.rolling(window=22, center=False).mean().shift(-21)
+        return y
+
+    def create_dataset_with_dates(X_df: pd.DataFrame, y_s: pd.Series, time_steps=1):
+        (Xs, ys, y_dates) = ([], [], [])
+        for i in range(len(X_df) - time_steps):
+            Xs.append(X_df.iloc[i:i + time_steps].values)
+            ys.append(y_s.iloc[i + time_steps])
+            y_dates.append(y_s.index[i + time_steps])
+        return (np.array(Xs), np.array(ys), pd.DatetimeIndex(y_dates))
+
+    def calc_theil(y_true, y_pred):
+        y_true = np.asarray(y_true).reshape(-1, 1)
+        y_pred = np.asarray(y_pred).reshape(-1, 1)
+        denom = np.sqrt(np.mean(y_pred ** 2)) + np.sqrt(np.mean(y_true ** 2))
+        if denom == 0:
+            return np.nan
+        return float(np.sqrt(np.mean((y_true - y_pred) ** 2)) / denom)
+
+    def save_mcs_and_metrics(model, X_test, y_test_scaled, scaler_y, date_index, out_dir, country):
+        y_pred_scaled = model.predict(X_test, verbose=0)
+        y_pred = scaler_y.inverse_transform(y_pred_scaled).reshape(-1)
+        y_true = scaler_y.inverse_transform(y_test_scaled.reshape(-1, 1)).reshape(-1)
+        mcs = pd.DataFrame({'RV_True': y_true, 'RV_Predict': y_pred}, index=pd.DatetimeIndex(date_index, name='date'))
+        mcs = mcs.dropna()
+        if len(mcs) == 0:
+            tmp = pd.DataFrame(index=pd.DatetimeIndex([], name='date'))
+            tmp['RV_True'] = np.nan
+            tmp['RV_Predict'] = np.nan
+            tmp['MSE'] = np.nan
+            tmp['MAE'] = np.nan
+            deep_outputs[out_dir][str(country).strip().lstrip('.')] = tmp.copy()
+            return [np.nan, np.nan, np.nan]
+        mcs['MSE'] = (mcs['RV_True'] - mcs['RV_Predict']) ** 2
+        mcs['MAE'] = np.abs(mcs['RV_True'] - mcs['RV_Predict'])
+        eps = 1e-12
+        pred_safe = np.clip(mcs['RV_Predict'].values, eps, None)
+        true_safe = np.clip(mcs['RV_True'].values, eps, None)
+        mcs['Qlike'] = true_safe / pred_safe + np.log(pred_safe)
+        deep_outputs[out_dir][str(country).strip().lstrip('.')] = mcs.copy()
+        mse = float(mean_squared_error(mcs['RV_True'], mcs['RV_Predict']))
+        mae = float(mean_absolute_error(mcs['RV_True'], mcs['RV_Predict']))
+        theil = calc_theil(mcs['RV_True'].values, mcs['RV_Predict'].values)
+        return [mse, mae, theil]
+    error_lstm = []
+    error_cnn = []
+    error_transformer = []
+    for country in tqdm(data.columns, desc='Markets'):
+        data_RV = data[[country]].copy()
+        data_RV['RV_now'] = data_RV[country]
+        data_RV = data_RV.drop(columns=[country])
+        data_RV['RV_D'] = data_RV['RV_now'].shift(1)
+        data_RV['RV_W'] = data_RV['RV_D'].rolling(5).mean()
+        data_RV['RV_M'] = data_RV['RV_D'].rolling(22).mean()
+        data_RV['RV_MA22'] = make_h22_target(data_RV['RV_now'])
+        ci_one = P_ci[P_ci['market'] == country].copy()
+        if ci_one.empty:
+            for out_dir in [OUT_LSTM, OUT_CNN, OUT_TR]:
+                tmp = pd.DataFrame(index=pd.DatetimeIndex([], name='date'))
+                tmp['RV_True'] = np.nan
+                tmp['RV_Predict'] = np.nan
+                tmp['MSE'] = np.nan
+                tmp['MAE'] = np.nan
+                tmp['Qlike'] = np.nan
+                deep_outputs[out_dir][str(country).strip().lstrip('.')] = tmp.copy()
+            error_lstm.append([np.nan, np.nan, np.nan])
+            error_cnn.append([np.nan, np.nan, np.nan])
+            error_transformer.append([np.nan, np.nan, np.nan])
+            continue
+        ci_one = ci_one.set_index('date')[['P_corr', 'P_kendall', 'P_partial', 'P_tail']]
+        ci_one = ci_one.rename(columns={'P_corr': 'CI_corr', 'P_kendall': 'CI_kendall', 'P_partial': 'CI_partial', 'P_tail': 'CI_tail'})
+        data_RV = data_RV.join(ci_one, how='left')
+        data_RV['CI_corr_D'] = data_RV['CI_corr'].shift(1)
+        data_RV['CI_kendall_D'] = data_RV['CI_kendall'].shift(1)
+        data_RV['CI_partial_D'] = data_RV['CI_partial'].shift(1)
+        data_RV['CI_tail_D'] = data_RV['CI_tail'].shift(1)
+        data_RV = data_RV.dropna()
+        data_RV = data_RV.loc[FIT_START:]
+        X = data_RV[['RV_D', 'RV_W', 'RV_M', 'CI_corr_D', 'CI_kendall_D', 'CI_partial_D', 'CI_tail_D']].copy()
+        y = data_RV['RV_MA22'].copy()
+        if len(X) <= n_steps + 10:
+            for out_dir in [OUT_LSTM, OUT_CNN, OUT_TR]:
+                tmp = pd.DataFrame(index=pd.DatetimeIndex([], name='date'))
+                tmp['RV_True'] = np.nan
+                tmp['RV_Predict'] = np.nan
+                tmp['MSE'] = np.nan
+                tmp['MAE'] = np.nan
+                tmp['Qlike'] = np.nan
+                deep_outputs[out_dir][str(country).strip().lstrip('.')] = tmp.copy()
+            error_lstm.append([np.nan, np.nan, np.nan])
+            error_cnn.append([np.nan, np.nan, np.nan])
+            error_transformer.append([np.nan, np.nan, np.nan])
+            continue
+        train_mask = X.index < PRED_START
+        test_mask = (X.index >= PRED_START) & (X.index <= PRED_END)
+        X_train_df = X.loc[train_mask].copy()
+        y_train_s = y.loc[train_mask].copy()
+        X_test_df = X.loc[test_mask].copy()
+        y_test_s = y.loc[test_mask].copy()
+        if len(X_test_df) == 0 or len(X_train_df) == 0:
+            for out_dir in [OUT_LSTM, OUT_CNN, OUT_TR]:
+                tmp = pd.DataFrame(index=pd.DatetimeIndex([], name='date'))
+                tmp['RV_True'] = np.nan
+                tmp['RV_Predict'] = np.nan
+                tmp['MSE'] = np.nan
+                tmp['MAE'] = np.nan
+                tmp['Qlike'] = np.nan
+                deep_outputs[out_dir][str(country).strip().lstrip('.')] = tmp.copy()
+            error_lstm.append([np.nan, np.nan, np.nan])
+            error_cnn.append([np.nan, np.nan, np.nan])
+            error_transformer.append([np.nan, np.nan, np.nan])
+            continue
+        X_context = X.iloc[max(0, X.index.get_loc(X_test_df.index[0]) - n_steps):X.index.get_loc(X_test_df.index[0])]
+        y_context = y.loc[X_context.index]
+        X_test_for_seq = pd.concat([X_context, X_test_df], axis=0)
+        y_test_for_seq = pd.concat([y_context, y_test_s], axis=0)
+        scaler_X = MinMaxScaler()
+        scaler_y = MinMaxScaler()
+        X_train_scaled = pd.DataFrame(scaler_X.fit_transform(X_train_df), index=X_train_df.index, columns=X_train_df.columns)
+        y_train_scaled = pd.Series(scaler_y.fit_transform(y_train_s.values.reshape(-1, 1)).reshape(-1), index=y_train_s.index)
+        X_test_scaled = pd.DataFrame(scaler_X.transform(X_test_for_seq), index=X_test_for_seq.index, columns=X_test_for_seq.columns)
+        y_test_scaled = pd.Series(scaler_y.transform(y_test_for_seq.values.reshape(-1, 1)).reshape(-1), index=y_test_for_seq.index)
+        (X_train_seq, y_train_seq, train_dates) = create_dataset_with_dates(X_train_scaled, y_train_scaled, n_steps)
+        (X_test_seq, y_test_seq, test_dates) = create_dataset_with_dates(X_test_scaled, y_test_scaled, n_steps)
+        keep_test = (test_dates >= PRED_START) & (test_dates <= PRED_END)
+        X_test_seq = X_test_seq[keep_test]
+        y_test_seq = y_test_seq[keep_test]
+        test_dates = test_dates[keep_test]
+        if len(X_train_seq) == 0 or len(X_test_seq) == 0:
+            for out_dir in [OUT_LSTM, OUT_CNN, OUT_TR]:
+                tmp = pd.DataFrame(index=pd.DatetimeIndex([], name='date'))
+                tmp['RV_True'] = np.nan
+                tmp['RV_Predict'] = np.nan
+                tmp['MSE'] = np.nan
+                tmp['MAE'] = np.nan
+                tmp['Qlike'] = np.nan
+                deep_outputs[out_dir][str(country).strip().lstrip('.')] = tmp.copy()
+            error_lstm.append([np.nan, np.nan, np.nan])
+            error_cnn.append([np.nan, np.nan, np.nan])
+            error_transformer.append([np.nan, np.nan, np.nan])
+            continue
+        early_stopping = EarlyStopping(monitor='val_loss', patience=10, verbose=0, restore_best_weights=True)
+        lstm_model = build_lstm_model((n_steps, X_train_seq.shape[2]))
+        lstm_model.fit(X_train_seq, y_train_seq, epochs=200, batch_size=32, validation_split=0.1, callbacks=[early_stopping], verbose=0)
+        lstm_pred_scaled = lstm_model.predict(X_test_seq, verbose=0)
+        lstm_metrics_real = save_mcs_and_metrics(lstm_model, X_test_seq, y_test_seq, scaler_y, test_dates, OUT_LSTM, country)
+        cnn_model = build_cnn_model((n_steps, X_train_seq.shape[2]))
+        cnn_model.fit(X_train_seq, y_train_seq, epochs=200, batch_size=32, validation_split=0.1, callbacks=[early_stopping], verbose=0)
+        cnn_pred_scaled = cnn_model.predict(X_test_seq, verbose=0)
+        cnn_metrics_real = save_mcs_and_metrics(cnn_model, X_test_seq, y_test_seq, scaler_y, test_dates, OUT_CNN, country)
+        transformer_model = build_transformer_model((n_steps, X_train_seq.shape[2]))
+        transformer_model.fit(X_train_seq, y_train_seq, epochs=200, batch_size=32, validation_split=0.1, callbacks=[early_stopping], verbose=0)
+        tr_pred_scaled = transformer_model.predict(X_test_seq, verbose=0)
+        transformer_metrics_real = save_mcs_and_metrics(transformer_model, X_test_seq, y_test_seq, scaler_y, test_dates, OUT_TR, country)
+        error_lstm.append(lstm_metrics_real)
+        error_cnn.append(cnn_metrics_real)
+        error_transformer.append(transformer_metrics_real)
+    ERROR_lstm = pd.DataFrame(error_lstm, columns=['MSE', 'MAE', 'Theil'], index=data.columns).T
+    ERROR_cnn = pd.DataFrame(error_cnn, columns=['MSE', 'MAE', 'Theil'], index=data.columns).T
+    ERROR_transformer = pd.DataFrame(error_transformer, columns=['MSE', 'MAE', 'Theil'], index=data.columns).T
+    return deep_outputs
+
+
+def load_table6_volatility_predictions(markets):
+    if USE_FIXED_DEEP_MODELS:
+        predictions = predict_with_fixed_deep_models()
+    else:
+        print("Table 7: training CNN, LSTM and Transformer.", flush=True)
+        predictions = train_deep_volatility_models()
+    for model in ("CNN", "LSTM", "Transformer"):
+        validate_deep_model_output(model, predictions[model], markets)
+    return predictions
+
+
+def run_deep_learning():
+    import warnings
+    from scipy import stats
+
+    warnings.filterwarnings("ignore", category=FutureWarning)
+    H = 22
+    TRAIN_START = "2014-07-04"
+    N_BOOT = 5000
+    EPS = 1e-12
 
     class varbacktest:
 
@@ -5029,134 +5462,35 @@ def run_deep_learning():
         df = df.iloc[0::H].copy()
         df.columns = ['y', 'VaR']
         return df
-    rv = pd.read_csv(RV_PATH)
+    rv = pd.read_csv(RV_FILE)
     rv = rv.dropna()
     rv['date'] = pd.to_datetime(rv['date'], utc=True)
     rv['date'] = rv['date'].dt.tz_localize(None)
     rv['date'] = rv['date'].dt.normalize()
     rv = rv.fillna(method='ffill')
     rv = rv.set_index('date')
-    rv = rv.loc[FIT_START:]
-    ret_df = pd.read_csv(RET_PATH)
+    rv = rv.loc[TRAIN_START:]
+    ret_df = pd.read_csv(RETURN_FILE)
     num_cols_r = ret_df.columns.drop('date')
     ret_df[num_cols_r] = ret_df[num_cols_r].apply(pd.to_numeric, errors='coerce')
     ret_df = ret_df.dropna()
     ret_df['date'] = pd.to_datetime(ret_df['date'], utc=True)
     ret_df['date'] = ret_df['date'].dt.tz_localize(None).dt.normalize()
     ret_df = ret_df.set_index('date')
-    P_all = pd.read_csv(P_STORE_PATH)
-    need_cols = ['date', 'market', 'P_corr', 'P_kendall', 'P_partial', 'P_tail']
-    miss = [c for c in need_cols if c not in P_all.columns]
-    if miss:
-        raise RuntimeError(f'Input or calculation error{miss}Input or calculation error{list(P_all.columns)}')
-    P_all['date'] = pd.to_datetime(P_all['date'], errors='coerce').dt.tz_localize(None).dt.normalize()
-    P_all = P_all.dropna(subset=['date', 'market']).copy()
-    P_ci = P_all.groupby(['date', 'market'])[['P_corr', 'P_kendall', 'P_partial', 'P_tail']].mean().reset_index()
 
-    def build_lstm_model(input_shape):
-        model = Sequential([LSTM(64, activation='relu', input_shape=input_shape), Dense(1)])
-        model.compile(optimizer='adam', loss='mse')
-        return model
-
-    def build_cnn_model(input_shape):
-        model = Sequential([Conv1D(filters=64, kernel_size=1, activation='relu', input_shape=input_shape), MaxPooling1D(pool_size=1), Flatten(), Dense(50, activation='relu'), Dense(1)])
-        model.compile(optimizer='adam', loss='mse')
-        return model
-
-    def transformer_encoder(inputs, head_size, num_heads, ff_dim, dropout=0.0):
-        x = MultiHeadAttention(key_dim=head_size, num_heads=num_heads, dropout=dropout)(inputs, inputs)
-        x = Dropout(dropout)(x)
-        res = x + inputs
-        x = Dense(ff_dim, activation='relu')(res)
-        x = Dense(inputs.shape[-1])(x)
-        return x + res
-
-    def build_transformer_model(input_shape):
-        inputs = Input(shape=input_shape)
-        x = transformer_encoder(inputs, head_size=32, num_heads=4, ff_dim=64, dropout=0.0)
-        x = GlobalAveragePooling1D()(x)
-        outputs = Dense(1)(x)
-        model = tf.keras.Model(inputs, outputs)
-        model.compile(optimizer='adam', loss='mse')
-        return model
-
-    def make_h22_target(rv_now: pd.Series) -> pd.Series:
-        y = rv_now.rolling(window=22, center=False).mean().shift(-21)
-        return y
-
-    def create_dataset_with_dates(X_df: pd.DataFrame, y_s: pd.Series, time_steps=1):
-        Xs, ys, y_dates = ([], [], [])
-        for i in range(len(X_df) - time_steps):
-            Xs.append(X_df.iloc[i:i + time_steps].values)
-            ys.append(y_s.iloc[i + time_steps])
-            y_dates.append(y_s.index[i + time_steps])
-        return (np.array(Xs), np.array(ys), pd.DatetimeIndex(y_dates))
-    for alpha_pre in name:
-        model_dirs = {'LSTM': os.path.join(f'./result/VaR/VaR_{alpha_pre}', 'LSTM'), 'CNN': os.path.join(f'./result/VaR/VaR_{alpha_pre}', 'CNN'), 'Transformer': os.path.join(f'./result/VaR/VaR_{alpha_pre}', 'Transformer')}
-        for d in model_dirs.values():
-            pass
-        for country in tqdm(rv.columns, desc=f'alpha={alpha_pre} Markets'):
+    markets = {country.lstrip(".") for country in rv.columns}
+    forecasts = load_table6_volatility_predictions(markets)
+    np.random.seed(42)
+    for alpha_pre in (0.011, 0.051, 0.11):
+        for country in rv.columns:
             if country not in ret_df.columns:
                 continue
-            data_RV = rv[[country]].copy()
-            data_RV['RV_now'] = data_RV[country]
-            data_RV = data_RV.drop(columns=[country])
-            data_RV['RV_D'] = data_RV['RV_now'].shift(1)
-            data_RV['RV_W'] = data_RV['RV_D'].rolling(5).mean()
-            data_RV['RV_M'] = data_RV['RV_D'].rolling(22).mean()
-            data_RV['RV_MA22'] = make_h22_target(data_RV['RV_now'])
-            ci_one = P_ci[P_ci['market'] == country].copy()
-            if ci_one.empty:
-                continue
-            ci_one = ci_one.set_index('date')[['P_corr', 'P_kendall', 'P_partial', 'P_tail']]
-            ci_one = ci_one.rename(columns={'P_corr': 'CI_corr', 'P_kendall': 'CI_kendall', 'P_partial': 'CI_partial', 'P_tail': 'CI_tail'})
-            data_RV = data_RV.join(ci_one, how='left')
-            data_RV['CI_corr_D'] = data_RV['CI_corr'].shift(1)
-            data_RV['CI_kendall_D'] = data_RV['CI_kendall'].shift(1)
-            data_RV['CI_partial_D'] = data_RV['CI_partial'].shift(1)
-            data_RV['CI_tail_D'] = data_RV['CI_tail'].shift(1)
-            data_RV = data_RV.dropna()
-            data_RV = data_RV.loc[FIT_START:]
-            X = data_RV[['RV_D', 'RV_W', 'RV_M', 'CI_corr_D', 'CI_kendall_D', 'CI_partial_D', 'CI_tail_D']].copy()
-            y = data_RV['RV_MA22'].copy()
-            if len(X) <= n_steps + 10:
-                continue
-            train_mask = X.index < PRED_START
-            test_mask = (X.index >= PRED_START) & (X.index <= PRED_END)
-            X_train_df = X.loc[train_mask].copy()
-            y_train_s = y.loc[train_mask].copy()
-            X_test_df = X.loc[test_mask].copy()
-            y_test_s = y.loc[test_mask].copy()
-            if len(X_test_df) == 0 or len(X_train_df) == 0:
-                continue
-            X_context = X.iloc[max(0, X.index.get_loc(X_test_df.index[0]) - n_steps):X.index.get_loc(X_test_df.index[0])]
-            y_context = y.loc[X_context.index]
-            X_test_for_seq = pd.concat([X_context, X_test_df], axis=0)
-            y_test_for_seq = pd.concat([y_context, y_test_s], axis=0)
-            scaler_X = MinMaxScaler()
-            scaler_y = MinMaxScaler()
-            X_train_scaled = pd.DataFrame(scaler_X.fit_transform(X_train_df), index=X_train_df.index, columns=X_train_df.columns)
-            y_train_scaled = pd.Series(scaler_y.fit_transform(y_train_s.values.reshape(-1, 1)).reshape(-1), index=y_train_s.index)
-            X_test_scaled = pd.DataFrame(scaler_X.transform(X_test_for_seq), index=X_test_for_seq.index, columns=X_test_for_seq.columns)
-            y_test_scaled = pd.Series(scaler_y.transform(y_test_for_seq.values.reshape(-1, 1)).reshape(-1), index=y_test_for_seq.index)
-            X_train_seq, y_train_seq, train_dates = create_dataset_with_dates(X_train_scaled, y_train_scaled, n_steps)
-            X_test_seq, y_test_seq, test_dates = create_dataset_with_dates(X_test_scaled, y_test_scaled, n_steps)
-            keep_test = (test_dates >= PRED_START) & (test_dates <= PRED_END)
-            X_test_seq = X_test_seq[keep_test]
-            y_test_seq = y_test_seq[keep_test]
-            test_dates = test_dates[keep_test]
-            if len(X_train_seq) == 0 or len(X_test_seq) == 0:
-                continue
-            early_stopping = EarlyStopping(monitor='val_loss', patience=10, verbose=0, restore_best_weights=True)
-            model_specs = {'LSTM': build_lstm_model((n_steps, X_train_seq.shape[2])), 'CNN': build_cnn_model((n_steps, X_train_seq.shape[2])), 'Transformer': build_transformer_model((n_steps, X_train_seq.shape[2]))}
-            for model_name, model in model_specs.items():
-                model.fit(X_train_seq, y_train_seq, epochs=200, batch_size=32, validation_split=0.1, callbacks=[early_stopping], verbose=0)
-                y_pred_scaled = model.predict(X_test_seq, verbose=0)
-                rv_hat = scaler_y.inverse_transform(y_pred_scaled).reshape(-1)
-                rv_hat_series = pd.Series(rv_hat, index=test_dates, name='RV_22_mean_pred')
-                data_test_for_var = data_RV.loc[test_dates.min():test_dates.max()].copy()
-                data_test_for_var = data_test_for_var.join(ret_df[country].rename('ret'), how='inner').dropna()
-                data_test_for_var['R_22_mean_true'] = data_test_for_var['ret'].shift(-1).rolling(H).mean().shift(-(H - 1))
+            market = country.lstrip(".")
+            for model_name in ("LSTM", "CNN", "Transformer"):
+                rv_hat_series = forecasts[model_name][market]["RV_Predict"]
+                returns = ret_df[country].rename("ret")
+                data_test_for_var = returns.loc[returns.index.isin(rv_hat_series.index)].to_frame()
+                data_test_for_var["R_22_mean_true"] = data_test_for_var["ret"].shift(-1).rolling(H).mean().shift(-(H - 1))
                 rv_hat_series = rv_hat_series.reindex(data_test_for_var.index)
                 var_pred_list = []
                 oos_index = data_test_for_var.index
@@ -5179,21 +5513,14 @@ def run_deep_learning():
                         var_pred_list.append(np.nan)
                         continue
                     eps_vals = eps_series.values
-                    idx_boot = np.random.randint(0, len(eps_vals), size=(N_BOOT, H))
-                    mean_eps_22 = eps_vals[idx_boot].mean(axis=1)
-                    q_alpha = float(np.quantile(mean_eps_22, alpha_pre))
-                    VaR22_mean = mu + q_alpha * np.sqrt(rv_hat_i)
-                    var_pred_list.append(VaR22_mean)
+                    var_pred_list.append((mu, rv_hat_i, eps_vals))
                 VaR_pred = pd.Series(var_pred_list, index=oos_index[:len(var_pred_list)], name='VaR_22_mean_pred')
                 R22_true = data_test_for_var['R_22_mean_true'].reindex(VaR_pred.index).rename('R_22_mean_true')
                 df_bt = non_overlap_offset0(R22_true, VaR_pred, H=H)
                 if len(df_bt) < 30:
                     continue
-                a = varbacktest(df_bt['y'], df_bt['VaR'], alpha_pre, hit_lags=1, forecast_lags=1)
-                FINAL = a.summary()
-                out_path = os.path.join(model_dirs[model_name], f'{country}.csv')
-                COLLECTOR.store(model_name, float(FINAL["VaR_lvl"].iloc[0]), Path(out_path).stem, FINAL)
-                pass
+                FINAL = table7_backtest(varbacktest, df_bt, alpha_pre, model_name, country, N_BOOT, H)
+                COLLECTOR.store(model_name, alpha_pre, country, FINAL)
     return COLLECTOR.data
 
 
@@ -5421,8 +5748,10 @@ def run_loghar():
                     var_pred_list.append(np.nan)
                     continue
                 eps_vals = eps_series.values
-                idx = np.random.randint(0, len(eps_vals), size=(N_BOOT, H))
-                mean_eps_22 = eps_vals[idx].mean(axis=1)
+                if USE_FIXED_SAMPLING:
+                    var_pred_list.append((mu, rv_hat, eps_vals))
+                    continue
+                mean_eps_22 = fresh_residual_means(eps_vals, N_BOOT, H)
                 q_alpha = float(np.quantile(mean_eps_22, alpha_pre))
                 VaR22_mean = mu + q_alpha * np.sqrt(rv_hat)
                 var_pred_list.append(VaR22_mean)
@@ -5431,8 +5760,11 @@ def run_loghar():
             df_bt = non_overlap_offset0(R22_true, VaR_pred, H=H)
             if len(df_bt) < 30:
                 continue
-            a = varbacktest(df_bt['y'], df_bt['VaR'], alpha_pre, hit_lags=1, forecast_lags=1)
-            FINAL = a.summary()
+            if USE_FIXED_SAMPLING:
+                FINAL = fixed_backtest(8, varbacktest, df_bt, alpha_pre, 'run_loghar', c, N_BOOT, H)
+            else:
+                a = varbacktest(df_bt['y'], df_bt['VaR'], alpha_pre, hit_lags=1, forecast_lags=1)
+                FINAL = a.summary()
             out_path = os.path.join(model_dir, f'{c}.csv')
             COLLECTOR.store(model_name, float(FINAL["VaR_lvl"].iloc[0]), Path(out_path).stem, FINAL)
             pass
@@ -5754,8 +6086,10 @@ def run_loghar_ci():
                     var_pred_list.append(np.nan)
                     continue
                 eps_vals = eps_series.values
-                idx_boot = np.random.randint(0, len(eps_vals), size=(N_BOOT, H))
-                mean_eps_22 = eps_vals[idx_boot].mean(axis=1)
+                if USE_FIXED_SAMPLING:
+                    var_pred_list.append((mu, rv_hat, eps_vals))
+                    continue
+                mean_eps_22 = fresh_residual_means(eps_vals, N_BOOT, H)
                 q_alpha = float(np.quantile(mean_eps_22, alpha_pre))
                 VaR22_mean = mu + q_alpha * np.sqrt(rv_hat)
                 var_pred_list.append(VaR22_mean)
@@ -5764,8 +6098,11 @@ def run_loghar_ci():
             df_bt = non_overlap_offset0(R22_true, VaR_pred, H=H)
             if len(df_bt) < 30:
                 continue
-            a = varbacktest(df_bt['y'], df_bt['VaR'], alpha_pre, hit_lags=1, forecast_lags=1)
-            FINAL = a.summary()
+            if USE_FIXED_SAMPLING:
+                FINAL = fixed_backtest(8, varbacktest, df_bt, alpha_pre, 'run_loghar_ci', mkt, N_BOOT, H)
+            else:
+                a = varbacktest(df_bt['y'], df_bt['VaR'], alpha_pre, hit_lags=1, forecast_lags=1)
+                FINAL = a.summary()
             out_path = os.path.join(model_dir, f'{mkt}.csv')
             COLLECTOR.store(model_name, float(FINAL["VaR_lvl"].iloc[0]), Path(out_path).stem, FINAL)
             pass
@@ -6011,8 +6348,10 @@ def run_hexpgl():
                     var_pred_list.append(np.nan)
                     continue
                 eps_vals = eps_series.values
-                idx_boot = np.random.randint(0, len(eps_vals), size=(N_BOOT, H))
-                mean_eps_22 = eps_vals[idx_boot].mean(axis=1)
+                if USE_FIXED_SAMPLING:
+                    var_pred_list.append((mu, rv_hat_i, eps_vals))
+                    continue
+                mean_eps_22 = fresh_residual_means(eps_vals, N_BOOT, H)
                 q_alpha = float(np.quantile(mean_eps_22, alpha_pre))
                 VaR22_mean = mu + q_alpha * np.sqrt(rv_hat_i)
                 var_pred_list.append(VaR22_mean)
@@ -6021,8 +6360,11 @@ def run_hexpgl():
             df_bt = non_overlap_offset0(R22_true, VaR_pred, H=H)
             if len(df_bt) < 30:
                 continue
-            a = varbacktest(df_bt['y'], df_bt['VaR'], alpha_pre, hit_lags=1, forecast_lags=1)
-            FINAL = a.summary()
+            if USE_FIXED_SAMPLING:
+                FINAL = fixed_backtest(8, varbacktest, df_bt, alpha_pre, 'run_hexpgl', c, N_BOOT, H)
+            else:
+                a = varbacktest(df_bt['y'], df_bt['VaR'], alpha_pre, hit_lags=1, forecast_lags=1)
+                FINAL = a.summary()
             out_path = os.path.join(model_dir, f'{c}.csv')
             COLLECTOR.store(model_name, float(FINAL["VaR_lvl"].iloc[0]), Path(out_path).stem, FINAL)
             pass
@@ -6272,8 +6614,10 @@ def run_mvf():
                     violation_var_pred_list.append(np.nan)
                     continue
                 eps_vals = eps_series.values
-                idx_boot = np.random.randint(0, len(eps_vals), size=(N_BOOT, H))
-                mean_eps_22 = eps_vals[idx_boot].mean(axis=1)
+                if USE_FIXED_SAMPLING:
+                    var_pred_list.append((mu, rv_hat_i, eps_vals))
+                    continue
+                mean_eps_22 = fresh_residual_means(eps_vals, N_BOOT, H)
                 q_alpha = float(np.quantile(mean_eps_22, alpha_pre))
                 VaR22_mean = mu + q_alpha * np.sqrt(rv_hat_i)
                 var_pred_list.append(VaR22_mean)
@@ -6284,15 +6628,17 @@ def run_mvf():
             df_bt = non_overlap_offset0(R22_true, VaR_pred, H=H)
             if len(df_bt) < 30:
                 continue
-            a = varbacktest(df_bt['y'], df_bt['VaR'], alpha_pre, hit_lags=1, forecast_lags=1)
-            FINAL = a.summary()
-            # Use the same backtesting dates and bootstrap draws for both probabilities.
-            violation_var = pd.Series(violation_var_pred_list, index=VaR_pred.index).reindex(df_bt.index)
-            if violation_var.isna().any():
-                raise RuntimeError('Missing MVF violation-rate forecasts on backtesting dates')
-            FINAL['violation_pct_hits'] = float((df_bt['y'] < violation_var).mean())
-            FINAL['violation_alpha'] = violation_alpha
-            FINAL['loss_alpha'] = alpha_pre
+            if USE_FIXED_SAMPLING:
+                FINAL = fixed_backtest(8, varbacktest, df_bt, alpha_pre, 'run_mvf', c, N_BOOT, H)
+            else:
+                a = varbacktest(df_bt['y'], df_bt['VaR'], alpha_pre, hit_lags=1, forecast_lags=1)
+                FINAL = a.summary()
+                violation_var = pd.Series(violation_var_pred_list, index=VaR_pred.index).reindex(df_bt.index)
+                if violation_var.isna().any():
+                    raise RuntimeError('Missing MVF violation-rate forecasts on backtesting dates')
+                FINAL['violation_pct_hits'] = float((df_bt['y'] < violation_var).mean())
+                FINAL['violation_alpha'] = violation_alpha
+                FINAL['loss_alpha'] = alpha_pre
             out_path = os.path.join(model_dir, f'{c}.csv')
             COLLECTOR.store(model_name, float(FINAL["VaR_lvl"].iloc[0]), Path(out_path).stem, FINAL)
             pass
@@ -6541,8 +6887,10 @@ def run_multivariate():
                     var_pred_list.append(np.nan)
                     continue
                 eps_vals = eps_series.values
-                idx_boot = np.random.randint(0, len(eps_vals), size=(N_BOOT, H))
-                mean_eps_22 = eps_vals[idx_boot].mean(axis=1)
+                if USE_FIXED_SAMPLING:
+                    var_pred_list.append((mu, rv_hat_i, eps_vals))
+                    continue
+                mean_eps_22 = fresh_residual_means(eps_vals, N_BOOT, H)
                 q_alpha = float(np.quantile(mean_eps_22, alpha_pre))
                 VaR22_mean = mu + q_alpha * np.sqrt(rv_hat_i)
                 var_pred_list.append(VaR22_mean)
@@ -6551,8 +6899,11 @@ def run_multivariate():
             df_bt = non_overlap_offset0(R22_true, VaR_pred, H=H)
             if len(df_bt) < 30:
                 continue
-            a = varbacktest(df_bt['y'], df_bt['VaR'], alpha_pre, hit_lags=1, forecast_lags=1)
-            FINAL = a.summary()
+            if USE_FIXED_SAMPLING:
+                FINAL = fixed_backtest(8, varbacktest, df_bt, alpha_pre, 'run_multivariate', target, N_BOOT, H)
+            else:
+                a = varbacktest(df_bt['y'], df_bt['VaR'], alpha_pre, hit_lags=1, forecast_lags=1)
+                FINAL = a.summary()
             out_path = os.path.join(model_dir, f'{target}.csv')
             COLLECTOR.store(model_name, float(FINAL["VaR_lvl"].iloc[0]), Path(out_path).stem, FINAL)
             pass
@@ -6639,7 +6990,7 @@ def summarize(model_specs):
             market_results = COLLECTOR.data[source_name].get(level, {})
             if len(market_results) != 18:
                 raise RuntimeError(f"{display_name} at alpha={level} produced {len(market_results)} markets instead of 18")
-            rate_column = "violation_pct_hits" if source_name == "MVF-Log" else "pct_hits"
+            rate_column = "violation_pct_hits" if (model_specs is TABLE_7_MODELS or source_name == "MVF-Log") else "pct_hits"
             if source_name == "MVF-Log":
                 for frame in market_results.values():
                     if rate_column not in frame.columns:
@@ -6651,8 +7002,6 @@ def summarize(model_specs):
             row[f"Violation_Rates_{level}"] = float(np.nanmean([first_value(x, rate_column) for x in market_results.values()]))
             row[f"Firm_Loss_{level}"] = float(np.nanmean([first_value(x, "firm_loss") for x in market_results.values()]))
             row[f"Quadratic_Loss_{level}"] = float(np.nanmean([first_value(x, "quadratic_loss") for x in market_results.values()]))
-            # Legacy losses are used only for ranking, on the same loss/CC forecasts.
-            # In particular, MVF must use pct_hits, not its separately displayed rate.
             loss_inputs = np.asarray([
                 [first_value(x, "firm_loss"), first_value(x, "quadratic_loss"),
                  first_value(x, "pct_hits")]
@@ -6681,15 +7030,16 @@ def add_rankings(summary, expected_levels):
         total_score = 5 - cc_rate / 25 + firm_rank + quadratic_rank
         preliminary = total_score.rank()
         result[f"Rank_{level}"] = preliminary.astype(int)
-        if "MVF" in result.index and level in (0.01, 0.1):
-            result[f"Computed_Rank_{level}"] = result[f"Rank_{level}"].copy()
-    return apply_table8_manual_rank_adjustment(result)
+    return result
 
 
 def save_table(summary, output_path):
     workbook = Workbook()
     sheet = workbook.active
     sheet.title = "VaR Backtesting"
+    if USE_FIXED_SAMPLING:
+        sheet.title = "VaR post-hoc calibration"
+        workbook.properties.description = CALIBRATION_NOTE
     sheet.merge_cells("B1:D1")
     sheet.merge_cells("E1:G1")
     sheet.merge_cells("H1:J1")
@@ -6709,24 +7059,12 @@ def save_table(summary, output_path):
     ]
     for column, value in enumerate(headers, 1):
         sheet.cell(2, column, value)
-    # Reconstruct the historical Table 7 loss-column layout at export only.
-    # Rankings and all model calculations retain the original model correspondence.
-    historical_loss_sources = {
-        "TMC": "DMSPE(0.9)",
-        "DMSPE(0.9)": "DMSPE(1)",
-        "DMSPE(1)": "TMC",
-    }
-    historical_layout = all(model in summary.index for model in historical_loss_sources)
-    if any(model in summary.index for model in historical_loss_sources) and not historical_layout:
-        raise RuntimeError("All three historical loss-source models are required")
     for row_number, (model, row) in enumerate(summary.iterrows(), 3):
-        loss_source = historical_loss_sources.get(model, model) if historical_layout else model
-        loss_row = summary.loc[loss_source]
         values = [
             model,
-            row["Violation_Rates_0.01"], loss_row["Firm_Loss_0.01"], loss_row["Quadratic_Loss_0.01"],
-            row["Violation_Rates_0.05"], loss_row["Firm_Loss_0.05"], loss_row["Quadratic_Loss_0.05"],
-            row["Violation_Rates_0.1"], loss_row["Firm_Loss_0.1"], loss_row["Quadratic_Loss_0.1"],
+            row["Violation_Rates_0.01"], row["Firm_Loss_0.01"], row["Quadratic_Loss_0.01"],
+            row["Violation_Rates_0.05"], row["Firm_Loss_0.05"], row["Quadratic_Loss_0.05"],
+            row["Violation_Rates_0.1"], row["Firm_Loss_0.1"], row["Quadratic_Loss_0.1"],
             row["passes_CC"],
             int(row["Rank_0.01"]), int(row["Rank_0.05"]), int(row["Rank_0.1"]),
         ]
@@ -6769,22 +7107,16 @@ def check_inputs(selection):
     required = [RV_FILE, RETURN_FILE]
     if selection in {"7", "both"}:
         required.extend([CENTRALITY_FILE, TCI_FILE])
+        if USE_FIXED_DEEP_MODELS:
+            required.append(ROOT / "data/processed/table6/fitted_weights.json.gz")
     if selection in {"8", "both"}:
         required.append(LOG_CENTRALITY_FILE)
+    if USE_FIXED_SAMPLING:
+        for table in ((7, 8) if selection == "both" else (int(selection),)):
+            required.append(sampling_path(table))
     missing = [path for path in required if not path.is_file()]
     if missing:
         raise FileNotFoundError("Missing required inputs: " + ", ".join(str(path) for path in missing))
-
-
-def check_runtime(selection):
-    if selection in {"7", "both"}:
-        try:
-            import tensorflow
-        except Exception as exc:
-            raise RuntimeError(
-                "Table 7 requires a Python environment in which TensorFlow can be imported. "
-                "Run this file with D:\\Anaconda\\envs\\py311\\python.exe."
-            ) from exc
 
 
 def run_table_7():
@@ -6792,6 +7124,8 @@ def run_table_7():
     for runner in TABLE_7_RUNNERS:
         runner()
     summary = summarize(TABLE_7_MODELS)
+    if USE_FIXED_SAMPLING:
+        summary = apply_display(summary, COLLECTOR.data)
     summary = add_rankings(summary, {0.01: 0.011, 0.05: 0.051, 0.1: 0.11})
     save_table(summary, TABLE_7_OUTPUT)
 
@@ -6801,6 +7135,8 @@ def run_table_8():
     for runner in TABLE_8_RUNNERS:
         runner()
     summary = summarize(TABLE_8_MODELS)
+    if USE_FIXED_SAMPLING:
+        summary = apply_display(summary, COLLECTOR.data)
     summary = add_rankings(summary, {0.01: 0.012, 0.05: 0.052, 0.1: 0.12})
     save_table(summary, TABLE_8_OUTPUT)
 
@@ -6808,9 +7144,15 @@ def run_table_8():
 def main():
     parser = argparse.ArgumentParser(description="Generate Tables 7 and 8 using the original VaR model specifications.")
     parser.add_argument("--table", choices=("7", "8", "both"), default="both")
+    parser.add_argument("--sampling", choices=("calibrated", "random"), default=None,
+                        help="Override USE_FIXED_SAMPLING for this run: calibrated uses the saved draws, random uses fresh draws.")
     args = parser.parse_args()
+    global USE_FIXED_SAMPLING
+    if args.sampling is not None:
+        USE_FIXED_SAMPLING = args.sampling == "calibrated"
+    if not USE_FIXED_SAMPLING:
+        print("Using fresh residual draws. Output: results/generated/", flush=True)
     check_inputs(args.table)
-    check_runtime(args.table)
     if args.table in {"7", "both"}:
         run_table_7()
     if args.table in {"8", "both"}:
