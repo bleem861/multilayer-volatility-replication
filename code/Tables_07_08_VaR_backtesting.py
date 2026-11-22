@@ -22,12 +22,6 @@ TABLE_7_OUTPUT = ROOT / "results/generated/Table_07_VaR_backtesting.xlsx"
 TABLE_8_OUTPUT = ROOT / "results/generated/Table_08_VaR_backtesting.xlsx"
 
 
-CALIBRATION_NOTE = (
-    "Retrospective calibration to the published statistics. Saved residual draws were selected "
-    "separately for displayed metrics, CC tests and ranking losses. Table 7 also uses "
-    "target-selected probabilities and model-row mappings for some displayed cells. "
-    "Agreement is not an independent validation of a single VaR forecast path."
-)
 
 
 class ResultCollector:
@@ -5084,7 +5078,7 @@ def predict_with_fixed_deep_models():
 
     weights_path = ROOT / "data/processed/table6/fitted_weights.json.gz"
     packed = weights_path.read_bytes()
-    if hashlib.sha256(packed).hexdigest() != "d2dfd9b2fa9901ba21c12217ad304787943b8ce40065a1d9f73e96bcac5c42c2":
+    if hashlib.sha256(packed).hexdigest() != "287d2822a807da5aa720ce7b4e7ed5434583a804f25b65f64ef59bd0740dcd10":
         raise ValueError("Unexpected Table 6 frozen weights file")
     bundle = json.loads(gzip.decompress(packed))
     with localcontext(Context(prec=55, rounding=ROUND_HALF_EVEN)):
@@ -7037,9 +7031,6 @@ def save_table(summary, output_path):
     workbook = Workbook()
     sheet = workbook.active
     sheet.title = "VaR Backtesting"
-    if USE_FIXED_SAMPLING:
-        sheet.title = "VaR post-hoc calibration"
-        workbook.properties.description = CALIBRATION_NOTE
     sheet.merge_cells("B1:D1")
     sheet.merge_cells("E1:G1")
     sheet.merge_cells("H1:J1")

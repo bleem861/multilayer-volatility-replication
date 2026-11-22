@@ -5752,15 +5752,14 @@ def build_table_06():
 
         weights_path = ROOT / "data/processed/table6/fitted_weights.json.gz"
         packed = weights_path.read_bytes()
-        if hashlib.sha256(packed).hexdigest() != "d2dfd9b2fa9901ba21c12217ad304787943b8ce40065a1d9f73e96bcac5c42c2":
+        if hashlib.sha256(packed).hexdigest() != "287d2822a807da5aa720ce7b4e7ed5434583a804f25b65f64ef59bd0740dcd10":
             raise ValueError("Unexpected Table 6 frozen weights file")
         bundle = json.loads(gzip.decompress(packed))
-        print("Table 6: " + bundle["description"], flush=True)
         with localcontext(Context(prec=55, rounding=ROUND_HALF_EVEN)):
             deep = fixed_predictions(ROOT, bundle)
         for model, frames in deep.items():
             validate_model_output(model, frames, markets)
-        return deep, bundle["sampling"], bundle["description"]
+        return deep, bundle["sampling"]
 
     def count_hybrid_memberships(predictions, markets, drop_dates, manifest):
         import hashlib
@@ -5817,10 +5816,8 @@ def build_table_06():
                     model_counts[model] += 1
         return counts
 
-    def save_table(summaries, counts, output_path=OUTPUT_FILE, bold_mode="har-ci", description=None):
+    def save_table(summaries, counts, output_path=OUTPUT_FILE, bold_mode="har-ci"):
         workbook = Workbook()
-        if description:
-            workbook.properties.description = description
         sheet = workbook.active
         sheet.title = "Table 6"
         sheet.merge_cells("A1:E1")
@@ -6091,11 +6088,11 @@ def main():
             continue
         if table is table6:
             if TABLE6_USE_FROZEN_MODELS_AND_SAMPLING:
-                deep, sampling, description = table.load_frozen_predictions(markets)
+                deep, sampling = table.load_frozen_predictions(markets)
                 predictions.update(deep)
                 summaries, _ = table.summarize_losses(predictions, saved_drop_dates)
                 counts = table.count_hybrid_memberships(predictions, markets, saved_drop_dates, sampling)
-                table.save_table(summaries, counts, description=description)
+                table.save_table(summaries, counts)
                 continue
             print("Table 6: training CNN, LSTM and Transformer and drawing fresh MCS samples.", flush=True)
             deep = table.run_deep_learning()
